@@ -1,9 +1,6 @@
 import os
 import discord
 from discord.ext import commands
-from dotenv import load_dotenv
-
-load_dotenv()  # take environment variables from .env.
 
 # Import the setup functions
 from stock_commands import setup as setup_stock_commands
