@@ -5,6 +5,11 @@ import os
 from abc import ABC, abstractmethod
 import polars as pl
 
+# Add to top of your bot.py
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 class BaseAPI(ABC):
     def __init__(self):
