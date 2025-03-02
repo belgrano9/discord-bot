@@ -10,6 +10,7 @@ python = "^3.12"
 discord-py = "^2.5.0"
 requests = "^2.32.3"
 polars = "^1.23.0"
+python-bitvavo-api = "^1.4.2"
 
 
 [build-system]

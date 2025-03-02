@@ -7,6 +7,7 @@ from stock_commands import setup as setup_stock_commands
 from stock_alerts import setup as setup_stock_alerts
 from portfolio_tracker import setup as setup_portfolio_tracker
 from scheduled_reports import ScheduledReports
+from trading_commands import setup as setup_trading_commands
 
 # Setup bot with intents
 intents = discord.Intents.default()
@@ -39,6 +40,10 @@ async def on_ready():
     scheduled_reports = ScheduledReports(bot, portfolio_tracker_cog)
     await bot.add_cog(scheduled_reports)  # Fixed: added 'await' here
     print("Scheduled reports loaded!")
+
+    # Load the new trading commands cog
+    await setup_trading_commands(bot)
+    print("Trading commands loaded!")
 
 
 @bot.command(name="ping")
