@@ -8,6 +8,7 @@ This repository contains interactive web applications built to help users unders
 
 1. **Bitvavo Fee Calculator** : Calculate cryptocurrency trading, deposit, and withdrawal fees on the Bitvavo exchange
 2. **DEGIRO Trade Fee Calculator** : Calculate stock trading costs including transaction fees, handling fees, and currency conversion costs for DEGIRO brokerage accounts
+3. **Kucoin**: TODO
 
 Both calculators provide detailed breakdowns and visual representations of fee structures to help users make informed trading decisions.
 

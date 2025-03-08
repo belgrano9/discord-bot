@@ -3,15 +3,20 @@ from discord.ext import commands
 import asyncio
 from datetime import datetime
 import os
-from bitvavo_handler import BitvavoHandler
+from kucoin_handler import KucoinAPI
 
 
 class TradingCommands(commands.Cog):
-    """Discord cog for trading cryptocurrency with Bitvavo API"""
+    """Discord cog for trading cryptocurrency with KuCoin API"""
 
     def __init__(self, bot):
         self.bot = bot
-        self.bitvavo = BitvavoHandler()
+        # Initialize the KuCoin API client
+        self.kucoin = KucoinAPI(
+            api_key=os.getenv("KUCOIN_API_KEY", ""),
+            api_secret=os.getenv("KUCOIN_API_SECRET", ""),
+            passphrase=os.getenv("KUCOIN_API_PASSPHRASE", "")
+        )
 
     async def _collect_trade_parameters(self, ctx, is_real=False):
         """Collect trade parameters interactively
@@ -49,22 +54,36 @@ class TradingCommands(commands.Cog):
         # 1. Ask for market/trading pair
         def validate_market(value):
             try:
-                markets = self.bitvavo.get_markets()
-                available_markets = [m["market"] for m in markets]
-                if value.upper() in available_markets:
+                # KuCoin doesn't have a direct "get markets" method like Bitvavo
+                # We'll accept any string in the format "XXX-YYY" for now
+                value = value.upper()
+                if "-" in value and len(value.split("-")) == 2:
                     return True, ""
-                return False, f"Market {value} not found in available markets."
+                return False, f"Market {value} doesn't seem to be in the correct format (e.g., BTC-USDT)."
             except Exception as e:
                 return False, f"Error validating market: {str(e)}"
 
         market = await get_user_input(
-            "📊 Enter the trading pair (e.g., BTC-EUR):", validator=validate_market
+            "📊 Enter the trading pair (e.g., BTC-USDT):", validator=validate_market
         )
         if not market:
             return None
         trade_data["market"] = market.upper()
 
-        # 2. Ask for side (buy/sell)
+        # 2. Ask for order type (market or limit)
+        def validate_order_type(value):
+            if value.lower() in ["market", "limit"]:
+                return True, ""
+            return False, "Invalid order type. Please enter 'market' or 'limit'."
+
+        order_type = await get_user_input(
+            "📝 Order type (market or limit)?", validator=validate_order_type
+        )
+        if not order_type:
+            return None
+        trade_data["order_type"] = order_type.lower()
+
+        # 3. Ask for side (buy/sell)
         def validate_side(value):
             if value.lower() in ["buy", "sell"]:
                 return True, ""
@@ -75,7 +94,7 @@ class TradingCommands(commands.Cog):
             return None
         trade_data["side"] = side.lower()
 
-        # 3. Ask for amount
+        # 4. Ask for amount
         def validate_amount(value):
             try:
                 amount = float(value)
@@ -92,9 +111,38 @@ class TradingCommands(commands.Cog):
             return None
         trade_data["amount"] = float(amount)
 
+        # 5. For limit orders, we need price
+        if trade_data["order_type"] == "limit":
+            def validate_price(value):
+                try:
+                    price = float(value)
+                    if price <= 0:
+                        return False, "Price must be positive."
+                    return True, ""
+                except:
+                    return False, "Invalid price. Please enter a valid number."
+
+            price = await get_user_input(
+                "💲 Enter the price for your limit order:", validator=validate_price
+            )
+            if not price:
+                return None
+            trade_data["price"] = float(price)
+        else:
+            # For market orders, we'll get the current price for display purposes
+            try:
+                ticker_data = self.kucoin.get_ticker(trade_data["market"])
+                if ticker_data and ticker_data.get("code") == "200000":
+                    trade_data["price"] = float(ticker_data["data"]["price"])
+                else:
+                    # Use a placeholder if we can't get the current price
+                    trade_data["price"] = 0.0
+            except:
+                trade_data["price"] = 0.0
+
         return trade_data
 
-    async def _process_trade(self, ctx, market, side, amount, is_real=False):
+    async def _process_trade(self, ctx, market, side, amount, price=None, order_type="limit", is_real=False):
         """Process a trade with confirmation and execution
 
         Args:
@@ -102,6 +150,8 @@ class TradingCommands(commands.Cog):
             market: Trading pair
             side: buy or sell
             amount: Amount to trade
+            price: Price for the order (required for limit orders)
+            order_type: Type of order (market or limit)
             is_real: Whether this is a real trade
 
         Returns:
@@ -109,6 +159,23 @@ class TradingCommands(commands.Cog):
         """
         market = market.upper()
         side = side.lower()
+        order_type = order_type.lower()
+
+        # For market orders without a provided price, get current price for display
+        if order_type == "market" and price is None:
+            try:
+                ticker_data = self.kucoin.get_ticker(market)
+                if ticker_data and ticker_data.get("code") == "200000":
+                    price = float(ticker_data["data"]["price"])
+                else:
+                    price = 0.0
+            except:
+                price = 0.0
+
+        # Validate inputs for different order types
+        if order_type == "limit" and price is None:
+            await ctx.send("❌ Price is required for limit orders.")
+            return False
 
         # Create confirmation embed
         if is_real:
@@ -125,24 +192,38 @@ class TradingCommands(commands.Cog):
             )
 
         try:
-            # Get current price
-            ticker = self.bitvavo.get_ticker(market)
-            current_price = float(ticker["price"])
+            # Get current price from KuCoin API for comparison
+            ticker_data = self.kucoin.get_ticker(market)
+            
+            # Check if we got valid data
+            if not ticker_data or ticker_data.get("code") != "200000":
+                await ctx.send(f"❌ Error getting market data for {market}")
+                return False
+                
+            current_price = float(ticker_data["data"]["price"])
 
-            # Calculate total value
-            total_value = amount * current_price
+            # Calculate total value based on order type
+            if order_type == "limit":
+                total_value = amount * price
+            else:  # market order
+                total_value = amount * current_price
 
             embed.add_field(name="Market", value=market, inline=True)
             embed.add_field(name="Side", value=side.upper(), inline=True)
+            embed.add_field(name="Order Type", value=order_type.capitalize(), inline=True)
             embed.add_field(name="Amount", value=f"{amount}", inline=True)
+            
+            if order_type == "limit":
+                embed.add_field(
+                    name="Your Order Price", value=f"${price:.2f}", inline=True
+                )
+            
             embed.add_field(
-                name="Current Price", value=f"€{current_price:.2f}", inline=True
+                name="Current Market Price", value=f"${current_price:.2f}", inline=True
             )
+            
             embed.add_field(
-                name="Total Value", value=f"€{total_value:.2f}", inline=True
-            )
-            embed.add_field(
-                name="Order Type", value="Market" if is_real else "Limit", inline=True
+                name="Estimated Value", value=f"${total_value:.2f}", inline=True
             )
 
             # Add confirmation instructions using reactions
@@ -173,84 +254,83 @@ class TradingCommands(commands.Cog):
 
                 if str(reaction.emoji) == "✅":
                     if is_real:
-                        # Place a real market order
-                        order = self.bitvavo.place_real_market_order(
-                            market, side, amount
-                        )
-
-                        success_embed = discord.Embed(
-                            title="✅ Real Order Placed",
-                            description="A real order has been placed on Bitvavo",
-                            color=discord.Color.green(),
-                        )
-
-                        # Add order details from the API response
-                        success_embed.add_field(
-                            name="Order ID",
-                            value=order.get("orderId", "N/A"),
-                            inline=False,
-                        )
-                        success_embed.add_field(
-                            name="Market", value=market, inline=True
-                        )
-                        success_embed.add_field(
-                            name="Side", value=side.upper(), inline=True
-                        )
-                        success_embed.add_field(
-                            name="Amount", value=f"{amount}", inline=True
-                        )
-                        success_embed.add_field(
-                            name="Order Type", value="Market", inline=True
-                        )
-                        success_embed.add_field(
-                            name="Status",
-                            value=order.get("status", "PLACED"),
-                            inline=True,
-                        )
-
-                        # Add fills if available
-                        if "fills" in order and order["fills"]:
-                            fills = order["fills"]
-                            for i, fill in enumerate(fills[:3]):  # Show up to 3 fills
-                                fill_info = f"Price: {fill.get('price', 'N/A')}\n"
-                                fill_info += f"Amount: {fill.get('amount', 'N/A')}\n"
-                                fill_info += f"Fee: {fill.get('fee', 'N/A')} {fill.get('feeCurrency', '')}"
-                                success_embed.add_field(
-                                    name=f"Fill #{i+1}", value=fill_info, inline=True
-                                )
+                        # Placeholder for real order - not implementing for safety
+                        await ctx.send("⚠️ Real orders not implemented for safety reasons")
+                        return False
                     else:
-                        # Simulate placing an order
-                        order = self.bitvavo.simulate_order(market, side, amount)
+                        # Use the test order endpoint from KuCoin
+                        if order_type == "limit":
+                            order_result = self.kucoin.test_order(
+                                order_type="limit",
+                                symbol=market,
+                                side=side,
+                                price=str(price),
+                                size=str(amount),
+                                remark="Discord bot test order"
+                            )
+                        else:  # market order
+                            # For market orders, use size for buy/sell amount
+                            order_result = self.kucoin.test_order(
+                                order_type="market",
+                                symbol=market,
+                                side=side,
+                                size=str(amount),
+                                price=None,  # No price for market orders
+                                remark="Discord bot test order"
+                            )
 
-                        success_embed = discord.Embed(
-                            title="✅ Test Order Placed",
-                            description="A placeholder order has been created",
-                            color=discord.Color.green(),
-                        )
-                        success_embed.add_field(
-                            name="Order ID", value=order["orderId"], inline=False
-                        )
-                        success_embed.add_field(
-                            name="Market", value=order["market"], inline=True
-                        )
-                        success_embed.add_field(
-                            name="Side", value=side.upper(), inline=True
-                        )
-                        success_embed.add_field(
-                            name="Amount", value=f"{amount}", inline=True
-                        )
-                        success_embed.add_field(
-                            name="Price", value=f"€{current_price:.2f}", inline=True
-                        )
-                        success_embed.add_field(
-                            name="Total", value=f"€{total_value:.2f}", inline=True
-                        )
-                        success_embed.add_field(
-                            name="Status", value="PLACED (test)", inline=True
-                        )
+                        if order_result.get("code") == "200000":
+                            success_embed = discord.Embed(
+                                title="✅ Test Order Validated",
+                                description="Order parameters have been validated by KuCoin",
+                                color=discord.Color.green(),
+                            )
+                            
+                            # Add order details from the API response
+                            success_embed.add_field(
+                                name="Market", value=market, inline=True
+                            )
+                            success_embed.add_field(
+                                name="Side", value=side.upper(), inline=True
+                            )
+                            success_embed.add_field(
+                                name="Order Type", value=order_type.capitalize(), inline=True
+                            )
+                            success_embed.add_field(
+                                name="Amount", value=f"{amount}", inline=True
+                            )
+                            
+                            if order_type == "limit":
+                                success_embed.add_field(
+                                    name="Price", value=f"${price:.2f}", inline=True
+                                )
+                                success_embed.add_field(
+                                    name="Total", value=f"${total_value:.2f}", inline=True
+                                )
+                            
+                            success_embed.add_field(
+                                name="Status", value="VALIDATED (test)", inline=True
+                            )
 
-                    await ctx.send(embed=success_embed)
-                    return True
+                            # Add KuCoin response data
+                            if "data" in order_result:
+                                for key, value in order_result["data"].items():
+                                    success_embed.add_field(
+                                        name=key.capitalize(), 
+                                        value=str(value), 
+                                        inline=True
+                                    )
+                        else:
+                            # Handle API error
+                            error_msg = order_result.get("msg", "Unknown error")
+                            success_embed = discord.Embed(
+                                title="❌ Test Order Error",
+                                description=f"Error validating order: {error_msg}",
+                                color=discord.Color.red(),
+                            )
+
+                        await ctx.send(embed=success_embed)
+                        return True
                 else:
                     await ctx.send("❌ Order canceled.")
                     return False
@@ -265,23 +345,42 @@ class TradingCommands(commands.Cog):
 
     @commands.command(name="testtrade")
     async def test_trade(
-        self, ctx, market: str = "BTC-EUR", side: str = "buy", amount: float = 0.001
+        self, ctx, market: str = "BTC-USDT", side: str = "buy", amount: float = 0.001, 
+        price: float = None, order_type: str = "limit"
     ):
         """
-        Create a test trade with Bitvavo API
+        Create a test trade with KuCoin API
 
         Parameters:
-        market: Trading pair (e.g., BTC-EUR)
+        market: Trading pair (e.g., BTC-USDT)
         side: buy or sell
         amount: Amount to trade
+        price: Price for limit orders (optional for market orders)
+        order_type: Type of order (market or limit, default is limit)
 
-        Example: !testtrade BTC-EUR buy 0.001
+        Example: !testtrade BTC-USDT buy 0.001 50000 limit
+        Example: !testtrade BTC-USDT sell 0.001 market
         """
-        await self._process_trade(ctx, market, side, amount, is_real=False)
+        order_type = order_type.lower()
+        
+        # Set default price for limit orders if not provided
+        if order_type == "limit" and price is None:
+            try:
+                ticker_data = self.kucoin.get_ticker(market)
+                if ticker_data and ticker_data.get("code") == "200000":
+                    price = float(ticker_data["data"]["price"])
+                else:
+                    await ctx.send("❌ Price is required for limit orders.")
+                    return
+            except Exception as e:
+                await ctx.send(f"❌ Error getting current price: {str(e)}")
+                return
+
+        await self._process_trade(ctx, market, side, amount, price, order_type, is_real=False)
 
     @commands.command(name="interactivetrade")
     async def interactive_trade(self, ctx):
-        """Interactive trading command that asks for each trade parameter"""
+        """Interactive trading command that asks for each trade parameter including order type"""
         trade_data = await self._collect_trade_parameters(ctx, is_real=False)
         if trade_data:
             await self._process_trade(
@@ -289,187 +388,115 @@ class TradingCommands(commands.Cog):
                 trade_data["market"],
                 trade_data["side"],
                 trade_data["amount"],
+                trade_data.get("price"),  # Price might be None for market orders
+                trade_data["order_type"],
                 is_real=False,
             )
 
     @commands.command(name="realorder")
-    async def real_order(
-        self, ctx, market: str = None, side: str = None, amount: str = None
-    ):
+    async def real_order(self, ctx):
         """
-        Create a real order on Bitvavo
-
-        Parameters:
-        market: Trading pair (e.g., BTC-EUR)
-        side: buy or sell
-        amount: Amount to trade
-
-        Example: !realorder BTC-EUR buy 0.001
-           or   !realorder (for interactive mode)
+        Create a real order on KuCoin (currently disabled for safety)
         """
-        # Interactive mode if parameters are not provided
-        if not all([market, side, amount]):
-            await ctx.send(
-                "⚠️ **REAL ORDER MODE** - This will place actual orders with real funds!"
-            )
-            trade_data = await self._collect_trade_parameters(ctx, is_real=True)
-            if trade_data:
-                await self._process_trade(
-                    ctx,
-                    trade_data["market"],
-                    trade_data["side"],
-                    trade_data["amount"],
-                    is_real=True,
-                )
-            return
+        await ctx.send("⚠️ Real orders have been disabled for safety reasons in this implementation.")
 
-        # Direct mode with parameters
+    @commands.command(name="ticker")
+    async def get_ticker(self, ctx, symbol: str = "BTC-USDT"):
+        """Get ticker information for a trading pair on KuCoin"""
         try:
-            amount_float = float(amount)
-            await self._process_trade(ctx, market, side, amount_float, is_real=True)
-        except ValueError:
-            await ctx.send("❌ Invalid amount. Please enter a valid number.")
+            ticker_data = self.kucoin.get_ticker(symbol)
+            
+            if not ticker_data or ticker_data.get("code") != "200000":
+                await ctx.send(f"❌ Error getting ticker data for {symbol}: {ticker_data.get('msg', 'Unknown error')}")
+                return
 
-    @commands.command(name="markets")
-    async def list_markets(self, ctx, filter_str: str = None):
-        """List available markets on Bitvavo"""
-        try:
-            markets = self.bitvavo.get_markets(filter_str)
-            markets = markets[
-                :25
-            ]  # Limit to 25 results to avoid Discord message limits
-
+            # Extract the data part of the response
+            ticker = ticker_data.get("data", {})
+            
             embed = discord.Embed(
-                title="Bitvavo Markets",
-                description=f"Showing {len(markets)} markets"
-                + (f" containing '{filter_str}'" if filter_str else ""),
+                title=f"{symbol} Ticker",
+                description="Current market data from KuCoin",
                 color=discord.Color.blue(),
             )
-
-            for market in markets:
-                market_name = market["market"]
-                status = market["status"]
-                embed.add_field(
-                    name=market_name,
-                    value=f"Status: {status}\nBase: {market['base']}\nQuote: {market['quote']}",
-                    inline=True,
-                )
-
+            
+            # Add relevant ticker fields
+            fields = [
+                ("Sequence", "sequence"),
+                ("Price", "price"),
+                ("Size", "size"),
+                ("Best Bid", "bestBid"),
+                ("Best Bid Size", "bestBidSize"),
+                ("Best Ask", "bestAsk"),
+                ("Best Ask Size", "bestAskSize"),
+                ("Time", "time")
+            ]
+            
+            for label, key in fields:
+                if key in ticker:
+                    value = ticker[key]
+                    # Format prices and sizes to look nicer
+                    if key in ["price", "bestBid", "bestAsk"]:
+                        try:
+                            value = f"${float(value):.2f}"
+                        except:
+                            pass
+                    # Format time if available
+                    if key == "time":
+                        try:
+                            timestamp = int(value) / 1000  # Convert ms to seconds
+                            value = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+                        except:
+                            pass
+                    embed.add_field(name=label, value=value, inline=True)
+            
             await ctx.send(embed=embed)
-
+            
         except Exception as e:
-            await ctx.send(f"❌ Error fetching markets: {str(e)}")
+            await ctx.send(f"❌ Error fetching ticker: {str(e)}")
+
+    @commands.command(name="fees")
+    async def get_fees(self, ctx, symbol: str = "BTC-USDT"):
+        """Get trading fees for a specific symbol on KuCoin"""
+        try:
+            fees_data = self.kucoin.get_trade_fees(symbol)
+            
+            if not fees_data or fees_data.get("code") != "200000":
+                await ctx.send(f"❌ Error getting fee data: {fees_data.get('msg', 'Unknown error')}")
+                return
+            
+            # Extract the fee data
+            fees = fees_data.get("data", [])
+            
+            if not fees:
+                await ctx.send(f"No fee data found for {symbol}")
+                return
+            
+            embed = discord.Embed(
+                title=f"Trading Fees",
+                description=f"Fee information for requested symbols",
+                color=discord.Color.blue(),
+            )
+            
+            for fee_info in fees:
+                symbol = fee_info.get("symbol", "Unknown")
+                
+                fee_details = ""
+                if "takerFeeRate" in fee_info:
+                    fee_details += f"Taker Fee: {float(fee_info['takerFeeRate'])*100:.4f}%\n"
+                if "makerFeeRate" in fee_info:
+                    fee_details += f"Maker Fee: {float(fee_info['makerFeeRate'])*100:.4f}%\n"
+                
+                embed.add_field(name=symbol, value=fee_details or "No fee data", inline=False)
+            
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error fetching fee data: {str(e)}")
 
     @commands.command(name="balance")
-    async def show_balance(self, ctx, symbol: str = None):
-        """Show your Bitvavo account balance"""
-        try:
-            if symbol:
-                balance = self.bitvavo.get_balance(symbol.upper())
-
-                embed = discord.Embed(
-                    title=f"Bitvavo {symbol.upper()} Balance",
-                    color=discord.Color.blue(),
-                )
-
-                # Safely access dictionary keys
-                embed.add_field(
-                    name="Symbol", value=balance.get("symbol", "N/A"), inline=True
-                )
-                embed.add_field(
-                    name="Available", value=balance.get("available", "0"), inline=True
-                )
-                embed.add_field(
-                    name="In Order", value=balance.get("inOrder", "0"), inline=True
-                )
-
-                await ctx.send(embed=embed)
-            else:
-                balances = self.bitvavo.get_balance()
-
-                if not balances:
-                    await ctx.send("No balances found or unable to retrieve balances")
-                    return
-
-                # Filter out zero balances if we have valid data
-                try:
-                    non_zero_balances = [
-                        b
-                        for b in balances
-                        if float(b.get("available", "0")) > 0
-                        or float(b.get("inOrder", "0")) > 0
-                    ]
-                except (ValueError, TypeError):
-                    await ctx.send("Error processing balance data")
-                    return
-
-                if not non_zero_balances:
-                    await ctx.send("No non-zero balances found")
-                    return
-
-                embed = discord.Embed(
-                    title="Bitvavo Account Balance",
-                    description=f"Showing {len(non_zero_balances)} currencies with non-zero balance",
-                    color=discord.Color.blue(),
-                )
-
-                for balance in non_zero_balances[:25]:
-                    symbol = balance.get("symbol", "Unknown")
-                    available = balance.get("available", "0")
-                    in_order = balance.get("inOrder", "0")
-
-                    embed.add_field(
-                        name=symbol,
-                        value=f"Available: {available}\nIn Order: {in_order}",
-                        inline=True,
-                    )
-
-                await ctx.send(embed=embed)
-
-        except Exception as e:
-            await ctx.send(f"❌ Error fetching balance: {str(e)}")
-            import traceback
-
-            traceback.print_exc()  # Print full error to console for debugging
-
-    @commands.command(name="orders")
-    async def list_orders(self, ctx, market: str = None):
-        """List your open orders on Bitvavo"""
-        try:
-            if not market:
-                await ctx.send("Please provide a market symbol (e.g., BTC-EUR)")
-                return
-
-            orders = self.bitvavo.get_orders(market.upper())
-
-            if not orders:
-                await ctx.send(f"No open orders found for {market.upper()}")
-                return
-
-            embed = discord.Embed(
-                title=f"Open Orders for {market.upper()}",
-                description=f"Showing {len(orders)} open orders",
-                color=discord.Color.blue(),
-            )
-
-            for order in orders:
-                order_id = order["orderId"]
-                side = order["side"].upper()
-                amount = order["amount"]
-                price = order["price"]
-                status = order["status"]
-                remaining = order.get("remaining", "N/A")
-
-                embed.add_field(
-                    name=f"{side} Order #{order_id[:8]}...",
-                    value=f"Amount: {amount}\nPrice: {price}\nRemaining: {remaining}\nStatus: {status}",
-                    inline=True,
-                )
-
-            await ctx.send(embed=embed)
-
-        except Exception as e:
-            await ctx.send(f"❌ Error fetching orders: {str(e)}")
+    async def show_balance(self, ctx):
+        """Show your KuCoin account information (placeholder)"""
+        await ctx.send("⚠️ Balance retrieval is not implemented in this simplified version for security reasons.")
 
 
 async def setup(bot):
