@@ -345,9 +345,189 @@ class KucoinAPI:
         
         return json.loads(response_data.decode("utf-8"))
      
+    def get_trade_history_spot(self, symbol, order_id=None, side=None, order_type=None, 
+                    last_id=None, limit=20, start_at=None, end_at=None):
+        """
+        Get a list of the latest spot transaction details
+        
+        Args:
+            symbol: Trading pair symbol (e.g., BTC-USDT) - required
+            order_id: Unique order id (optional)
+            side: 'buy' or 'sell' (optional)
+            order_type: 'limit' or 'market' (optional)
+            last_id: ID for pagination (optional)
+            limit: Number of records to return, default 20, max 100 (optional)
+            start_at: Start time in milliseconds (optional)
+            end_at: End time in milliseconds (optional)
+            
+        Returns:
+            JSON response with trade history data
+        """
+        # Construct query parameters
+        query_params = {"symbol": symbol}
+        
+        # Add optional parameters if provided
+        if order_id:
+            query_params["orderId"] = order_id
+        if side:
+            query_params["side"] = side
+        if order_type:
+            query_params["type"] = order_type
+        if last_id:
+            query_params["lastId"] = last_id
+        if limit:
+            query_params["limit"] = limit
+        if start_at:
+            query_params["startAt"] = start_at
+        if end_at:
+            query_params["endAt"] = end_at
+        
+        # Build the path with query parameters
+        path = f"/api/v1/hf/fills?{urlencode(query_params)}"
+        method = "GET"
+        
+        # Create signature for authentication
+        payload = method + path
+        headers = self.signer.headers(payload)
+        
+        # Set up the connection using http.client
+        conn = http.client.HTTPSConnection(self.host)
+        conn.request(method, path, "", headers)
+        
+        # Get and process response
+        res = conn.getresponse()
+        data = res.read()
+        conn.close()
+        
+        return json.loads(data.decode("utf-8"))
      
     #### MARGIN TRADING ##### 
+    def get_margin_trade_history(self, symbol, trade_type, order_id=None, side=None, 
+                           order_type=None, last_id=None, limit=20, start_at=None, end_at=None):
+        """
+        Get a list of the latest margin transaction details
+        
+        Args:
+            symbol: Trading pair symbol (e.g., BTC-USDT) - required
+            trade_type: Trade type (MARGIN_TRADE for cross margin, MARGIN_ISOLATED_TRADE for isolated) - required
+            order_id: Unique order id (optional)
+            side: 'buy' or 'sell' (optional)
+            order_type: 'limit' or 'market' (optional)
+            last_id: ID for pagination (optional)
+            limit: Number of records to return, default 20, max 100 (optional)
+            start_at: Start time in milliseconds (optional)
+            end_at: End time in milliseconds (optional)
+            
+        Returns:
+            JSON response with margin trade history data
+        """
+        # Validate trade_type
+        valid_trade_types = ["MARGIN_TRADE", "MARGIN_ISOLATED_TRADE"]
+        if trade_type not in valid_trade_types:
+            raise ValueError(f"Invalid trade_type. Must be one of: {', '.join(valid_trade_types)}")
+        
+        # Construct query parameters
+        query_params = {
+            "symbol": symbol,
+            "tradeType": trade_type
+        }
+        
+        # Add optional parameters if provided
+        if order_id:
+            query_params["orderId"] = order_id
+        if side:
+            query_params["side"] = side
+        if order_type:
+            query_params["type"] = order_type
+        if last_id:
+            query_params["lastId"] = last_id
+        if limit:
+            query_params["limit"] = limit
+        if start_at:
+            query_params["startAt"] = start_at
+        if end_at:
+            query_params["endAt"] = end_at
+        
+        # Build the path with query parameters
+        path = f"/api/v3/hf/margin/fills?{urlencode(query_params)}"
+        method = "GET"
+        
+        # Create signature for authentication
+        payload = method + path
+        headers = self.signer.headers(payload)
+        
+        # Set up the connection using http.client
+        conn = http.client.HTTPSConnection(self.host)
+        conn.request(method, path, "", headers)
+        
+        # Get and process response
+        res = conn.getresponse()
+        data = res.read()
+        conn.close()
+        
+        return json.loads(data.decode("utf-8"))
 
+    def get_margin_closed_orders(self, symbol, trade_type, side=None, order_type=None,
+                           last_id=None, limit=20, start_at=None, end_at=None):
+        """
+        Get a list of completed margin orders
+        
+        Args:
+            symbol: Trading pair symbol (e.g., BTC-USDT) - required
+            trade_type: Trade type (MARGIN_TRADE for cross margin, MARGIN_ISOLATED_TRADE for isolated) - required
+            side: 'buy' or 'sell' (optional)
+            order_type: 'limit' or 'market' (optional)
+            last_id: ID for pagination (optional)
+            limit: Number of records to return, default 20, max 100 (optional)
+            start_at: Start time in milliseconds (optional)
+            end_at: End time in milliseconds (optional)
+            
+        Returns:
+            JSON response with closed margin orders data
+        """
+        # Validate trade_type
+        valid_trade_types = ["MARGIN_TRADE", "MARGIN_ISOLATED_TRADE"]
+        if trade_type not in valid_trade_types:
+            raise ValueError(f"Invalid trade_type. Must be one of: {', '.join(valid_trade_types)}")
+        
+        # Construct query parameters
+        query_params = {
+            "symbol": symbol,
+            "tradeType": trade_type
+        }
+        
+        # Add optional parameters if provided
+        if side:
+            query_params["side"] = side
+        if order_type:
+            query_params["type"] = order_type
+        if last_id:
+            query_params["lastId"] = last_id
+        if limit:
+            query_params["limit"] = limit
+        if start_at:
+            query_params["startAt"] = start_at
+        if end_at:
+            query_params["endAt"] = end_at
+        
+        # Build the path with query parameters
+        path = f"/api/v3/hf/margin/orders/done?{urlencode(query_params)}"
+        method = "GET"
+        
+        # Create signature for authentication
+        payload = method + path
+        headers = self.signer.headers(payload)
+        
+        # Set up the connection using http.client
+        conn = http.client.HTTPSConnection(self.host)
+        conn.request(method, path, "", headers)
+        
+        # Get and process response
+        res = conn.getresponse()
+        data = res.read()
+        conn.close()
+        
+        return json.loads(data.decode("utf-8"))
 
 if __name__ == '__main__':
     key = os.getenv("KUCOIN_API_KEY", "")
@@ -355,17 +535,21 @@ if __name__ == '__main__':
     passphrase = os.getenv("KUCOIN_API_PASSPHRASE", "")
     account_id = os.getenv("KUCOIN_ID", "")
 
+
+    from datetime import datetime, timedelta
+
     kucoin_api = KucoinAPI(key, secret, passphrase)
+    # Calculate timestamp for yesterday and today
+    end_time = int(datetime.now().timestamp() * 1000)
+    start_time = int((datetime.now() - timedelta(days=2)).timestamp() * 1000)
 
-    orderbook_data = kucoin_api.get_ticker("BTC-USDT")
-    print(json.dumps(orderbook_data, indent=2))
-
-    test_result = kucoin_api.test_order(
-    order_type="limit",
-    symbol="BTC-USDT",
-    side="buy",
-    price="50000",
-    size="0.00001",
-    remark="test order"
+    # Test with explicit time range
+    order_history = kucoin_api.get_margin_closed_orders(
+        "BTC-USDT", 
+        "MARGIN_ISOLATED_TRADE",
+        start_at=start_time,
+        end_at=end_time
     )
-    print(json.dumps(test_result, indent=2))
+    print(json.dumps(order_history, indent=2))
+
+
