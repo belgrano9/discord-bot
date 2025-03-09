@@ -672,6 +672,8 @@ if __name__ == '__main__':
     n = balance["data"]["assets"][0]["baseAsset"]["available"] 
     print(balance["data"]["assets"][0])
 
+
+    #TODO I NEED TO CHECK THE AUTOBORROW STUFF --> SHORT SELLING
     #buy_order = kucoin_api.add_margin_order(symbol="BTC-USDT", side="buy", size = 0.00001178, price=84750, order_type="limit")
                 
     #buy_order_id = "67cd7f70dd862b0007a59abb" #buy_order["data"]["orderId"]

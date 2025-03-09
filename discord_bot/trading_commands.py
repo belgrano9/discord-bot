@@ -142,207 +142,113 @@ class TradingCommands(commands.Cog):
 
         return trade_data
 
-    async def _process_trade(self, ctx, market, side, amount, price=None, order_type="limit", is_real=False):
-        """Process a trade with confirmation and execution
+    async def _process_real_trade(self, ctx, market: str, side: str, amount: float, price: float = None, order_type: str = "limit", use_funds: bool = False):
+        """Process a real trade on KuCoin
 
         Args:
             ctx: Discord context
             market: Trading pair
             side: buy or sell
-            amount: Amount to trade
-            price: Price for the order (required for limit orders)
+            amount: Amount to trade (interpreted as size or funds based on use_funds)
+            price: Price for limit orders (optional for market orders)
             order_type: Type of order (market or limit)
-            is_real: Whether this is a real trade
+            use_funds: If True, treat amount as funds (total value) for market buy orders
 
         Returns:
-            bool: Whether the trade was completed
+            bool: Whether the trade was completed successfully
         """
-        market = market.upper()
-        side = side.lower()
-        order_type = order_type.lower()
-
-        # For market orders without a provided price, get current price for display
-        if order_type == "market" and price is None:
-            try:
-                ticker_data = self.kucoin.get_ticker(market)
-                if ticker_data and ticker_data.get("code") == "200000":
-                    price = float(ticker_data["data"]["price"])
-                else:
-                    price = 0.0
-            except:
-                price = 0.0
-
-        # Validate inputs for different order types
-        if order_type == "limit" and price is None:
-            await ctx.send("❌ Price is required for limit orders.")
-            return False
-
-        # Create confirmation embed
-        if is_real:
-            embed = discord.Embed(
-                title="⚠️ REAL ORDER CONFIRMATION ⚠️",
-                description="**WARNING: This will place a REAL order using REAL funds!**",
-                color=discord.Color.red(),
-            )
-        else:
-            embed = discord.Embed(
-                title="📋 Confirm Test Trade",
-                description="Please confirm you want to place the following order:",
-                color=discord.Color.gold(),
-            )
-
         try:
-            # Get current price from KuCoin API for comparison
-            ticker_data = self.kucoin.get_ticker(market)
+            # Prepare order parameters
+            side = side.lower()
+            order_type = order_type.lower()
+            market = market.upper()
             
-            # Check if we got valid data
-            if not ticker_data or ticker_data.get("code") != "200000":
-                await ctx.send(f"❌ Error getting market data for {market}")
+            # Create an order based on the type
+            if order_type == "limit":
+                if price is None:
+                    await ctx.send("❌ Price is required for limit orders.")
+                    return False
+                    
+                response = self.kucoin.add_margin_order(
+                    symbol=market,
+                    side=side,
+                    order_type="limit",
+                    size=str(amount),
+                    price=str(price),
+                    margin_model="isolated",  # Using isolated margin trading
+                    auto_borrow=False,        # Auto-borrow if needed
+                    time_in_force="GTC"      # Good Till Canceled
+                )
+            else:  # market order
+                if use_funds and side == "buy":
+                    # Use funds parameter for market buy
+                    response = self.kucoin.add_margin_order(
+                        symbol=market,
+                        side=side,
+                        order_type="market",
+                        funds=str(amount),    # Use amount as funds
+                        margin_model="isolated", 
+                        auto_borrow=False      
+                    )
+                else:
+                    # Use size parameter (default behavior, and required for sell)
+                    response = self.kucoin.add_margin_order(
+                        symbol=market,
+                        side=side,
+                        order_type="market",
+                        size=str(amount),     # Use amount as size
+                        margin_model="isolated", 
+                        auto_borrow=False      
+                    )
+            
+            # Check if the order was successful
+            if response.get("code") == "200000":
+                # Create a success embed
+                color = discord.Color.green() if side == "buy" else discord.Color.red()
+                embed = discord.Embed(
+                    title=f"✅ {side.upper()} Order Placed",
+                    description=f"Your {order_type} order has been placed successfully",
+                    color=color
+                )
+                
+                # Add order details
+                embed.add_field(name="Market", value=market, inline=True)
+                embed.add_field(name="Type", value=order_type.capitalize(), inline=True)
+                embed.add_field(name="Side", value=side.upper(), inline=True)
+                
+                if order_type == "market" and use_funds and side == "buy":
+                    embed.add_field(name="Funds", value=f"${amount}", inline=True)
+                else:
+                    embed.add_field(name="Amount", value=str(amount), inline=True)
+                
+                if order_type == "limit" and price:
+                    embed.add_field(name="Price", value=f"${price}", inline=True)
+                
+                # Add response data
+                if "data" in response:
+                    data = response["data"]
+                    if "orderId" in data:
+                        embed.add_field(name="Order ID", value=data["orderId"], inline=False)
+                    
+                    # Add borrow details if included in response
+                    if "borrowSize" in data:
+                        embed.add_field(name="Borrowed", value=data["borrowSize"], inline=True)
+                    if "loanApplyId" in data:
+                        embed.add_field(name="Loan ID", value=data["loanApplyId"], inline=True)
+                
+                await ctx.send(embed=embed)
+                return True
+                
+            else:
+                # Handle error response
+                error_msg = response.get("msg", "Unknown error")
+                await ctx.send(f"❌ Failed to place order: {error_msg}")
                 return False
                 
-            current_price = float(ticker_data["data"]["price"])
-
-            # Calculate total value based on order type
-            if order_type == "limit":
-                total_value = amount * price
-            else:  # market order
-                total_value = amount * current_price
-
-            embed.add_field(name="Market", value=market, inline=True)
-            embed.add_field(name="Side", value=side.upper(), inline=True)
-            embed.add_field(name="Order Type", value=order_type.capitalize(), inline=True)
-            embed.add_field(name="Amount", value=f"{amount}", inline=True)
-            
-            if order_type == "limit":
-                embed.add_field(
-                    name="Your Order Price", value=f"${price:.2f}", inline=True
-                )
-            
-            embed.add_field(
-                name="Current Market Price", value=f"${current_price:.2f}", inline=True
-            )
-            
-            embed.add_field(
-                name="Estimated Value", value=f"${total_value:.2f}", inline=True
-            )
-
-            # Add confirmation instructions using reactions
-            footer = (
-                "⚠️ React with ✅ to CONFIRM or ❌ to CANCEL ⚠️"
-                if is_real
-                else "React with ✅ to confirm or ❌ to cancel"
-            )
-            embed.set_footer(text=footer)
-
-            # Send the embed and add reaction buttons
-            message = await ctx.send(embed=embed)
-            await message.add_reaction("✅")
-            await message.add_reaction("❌")
-
-            # Wait for user to click a reaction
-            def check(reaction, user):
-                return (
-                    user == ctx.author
-                    and reaction.message.id == message.id
-                    and str(reaction.emoji) in ["✅", "❌"]
-                )
-
-            try:
-                reaction, user = await self.bot.wait_for(
-                    "reaction_add", timeout=60.0, check=check
-                )
-
-                if str(reaction.emoji) == "✅":
-                    if is_real:
-                        # Placeholder for real order - not implementing for safety
-                        await ctx.send("⚠️ Real orders not implemented for safety reasons")
-                        return False
-                    else:
-                        # Use the test order endpoint from KuCoin
-                        if order_type == "limit":
-                            order_result = self.kucoin.test_order(
-                                order_type="limit",
-                                symbol=market,
-                                side=side,
-                                price=str(price),
-                                size=str(amount),
-                                remark="Discord bot test order"
-                            )
-                        else:  # market order
-                            # For market orders, use size for buy/sell amount
-                            order_result = self.kucoin.test_order(
-                                order_type="market",
-                                symbol=market,
-                                side=side,
-                                size=str(amount),
-                                price=None,  # No price for market orders
-                                remark="Discord bot test order"
-                            )
-
-                        if order_result.get("code") == "200000":
-                            success_embed = discord.Embed(
-                                title="✅ Test Order Validated",
-                                description="Order parameters have been validated by KuCoin",
-                                color=discord.Color.green(),
-                            )
-                            
-                            # Add order details from the API response
-                            success_embed.add_field(
-                                name="Market", value=market, inline=True
-                            )
-                            success_embed.add_field(
-                                name="Side", value=side.upper(), inline=True
-                            )
-                            success_embed.add_field(
-                                name="Order Type", value=order_type.capitalize(), inline=True
-                            )
-                            success_embed.add_field(
-                                name="Amount", value=f"{amount}", inline=True
-                            )
-                            
-                            if order_type == "limit":
-                                success_embed.add_field(
-                                    name="Price", value=f"${price:.2f}", inline=True
-                                )
-                                success_embed.add_field(
-                                    name="Total", value=f"${total_value:.2f}", inline=True
-                                )
-                            
-                            success_embed.add_field(
-                                name="Status", value="VALIDATED (test)", inline=True
-                            )
-
-                            # Add KuCoin response data
-                            if "data" in order_result:
-                                for key, value in order_result["data"].items():
-                                    success_embed.add_field(
-                                        name=key.capitalize(), 
-                                        value=str(value), 
-                                        inline=True
-                                    )
-                        else:
-                            # Handle API error
-                            error_msg = order_result.get("msg", "Unknown error")
-                            success_embed = discord.Embed(
-                                title="❌ Test Order Error",
-                                description=f"Error validating order: {error_msg}",
-                                color=discord.Color.red(),
-                            )
-
-                        await ctx.send(embed=success_embed)
-                        return True
-                else:
-                    await ctx.send("❌ Order canceled.")
-                    return False
-
-            except asyncio.TimeoutError:
-                await ctx.send("⏱️ Confirmation timed out. Order canceled.")
-                return False
-
         except Exception as e:
-            await ctx.send(f"❌ Error creating order: {str(e)}")
+            await ctx.send(f"❌ Error placing order: {str(e)}")
             return False
-
+    
     @commands.command(name="testtrade")
     async def test_trade(
         self, ctx, market: str = "BTC-USDT", side: str = "buy", amount: float = 0.001, 
@@ -395,15 +301,18 @@ class TradingCommands(commands.Cog):
 
     @commands.command(name="realorder")
     async def real_order(self, ctx, market: str = None, side: str = None, amount: str = None, 
-                        price: str = None, order_type: str = "limit"):
+                        price_or_type: str = None, order_type: str = "limit"):
         """
         Create a real order on KuCoin with direct parameters
         
-        Usage: !realorder <market> <side> <amount> [price] [order_type]
+        Usage: !realorder <market> <side> <amount> [price_or_type] [order_type]
         
         Examples:
-        !realorder BTC-USDT buy 0.001 50000     (limit order to buy BTC at $50000)
-        !realorder ETH-USDT sell 0.1 market     (market order to sell 0.1 ETH)
+        !realorder BTC-USDT buy 0.001 50000         (limit order to buy 0.001 BTC at $50000)
+        !realorder BTC-USDT sell 0.001 market       (market order to sell 0.001 BTC)
+        !realorder ETH-USDT buy 0.05 2000           (limit order to buy 0.05 ETH at $2000)
+        !realorder ETH-USDT sell 0.05 market        (market order to sell 0.05 ETH)
+        !realorder BTC-USDT buy 100 market funds    (market order to buy $100 worth of BTC)
         """
         # Security measure: Check if user has the correct role before proceeding
         required_role = discord.utils.get(ctx.guild.roles, name="Trading-Authorized")
@@ -411,69 +320,64 @@ class TradingCommands(commands.Cog):
             await ctx.send("⛔ You don't have permission to place real orders. You need the 'Trading-Authorized' role.")
             return
 
-        # Check if we got direct parameters or need to collect interactively
+        # Check if we have all required parameters
         if not all([market, side, amount]):
-            await ctx.send("⚠️ Missing required parameters. Starting interactive mode instead...")
-            trade_data = await self._collect_trade_parameters(ctx, is_real=True)
-            if not trade_data:
-                return
-            
-            market = trade_data["market"]
-            side = trade_data["side"]
-            amount = trade_data["amount"]
-            price = trade_data.get("price")
-            order_type = trade_data["order_type"]
+            await ctx.send("❌ Missing required parameters. Use: !realorder <market> <side> <amount> [price_or_type] [order_type]")
+            return
+        
+        # Process parameters
+        side = side.lower()
+        if side not in ["buy", "sell"]:
+            await ctx.send("❌ Invalid side. Must be 'buy' or 'sell'.")
+            return
+        
+        # Check if using funds for market order
+        use_funds = False
+        if order_type.lower() == "funds":
+            use_funds = True
+            order_type = "market"
+        
+        # Check if the price_or_type parameter indicates market order
+        if price_or_type and price_or_type.lower() == "market":
+            order_type = "market"
+            price = None
         else:
-            # Process direct parameters
-            side = side.lower()
-            if side not in ["buy", "sell"]:
-                await ctx.send("❌ Invalid side. Must be 'buy' or 'sell'.")
-                return
-            
-            # Check if the last parameter is order type
-            if price and price.lower() == "market":
-                order_type = "market"
+            if order_type.lower() == "market":
                 price = None
             else:
-                order_type = order_type.lower()
-                if order_type not in ["limit", "market"]:
-                    await ctx.send("❌ Invalid order type. Must be 'limit' or 'market'.")
-                    return
-                
-                # If order type is market, price is not needed
-                if order_type == "market":
-                    price = None
-            
-            # Validate amount
+                order_type = "limit"
+                price = price_or_type
+        
+        # Validate amount
+        try:
+            amount = float(amount)
+            if amount <= 0:
+                await ctx.send("❌ Amount must be positive.")
+                return
+        except ValueError:
+            await ctx.send("❌ Invalid amount. Must be a number.")
+            return
+        
+        # Validate price for limit orders
+        if order_type == "limit" and price is not None:
             try:
-                amount = float(amount)
-                if amount <= 0:
-                    await ctx.send("❌ Amount must be positive.")
+                price = float(price)
+                if price <= 0:
+                    await ctx.send("❌ Price must be positive.")
                     return
             except ValueError:
-                await ctx.send("❌ Invalid amount. Must be a number.")
+                await ctx.send("❌ Invalid price. Must be a number.")
                 return
-            
-            # Validate price for limit orders
-            if order_type == "limit" and price is not None:
-                try:
-                    price = float(price)
-                    if price <= 0:
-                        await ctx.send("❌ Price must be positive.")
-                        return
-                except ValueError:
-                    await ctx.send("❌ Invalid price. Must be a number.")
-                    return
-            
-            # For market orders with no price specified
-            if order_type == "market" and price is None:
-                # Get current price for display purposes
-                try:
-                    ticker_data = self.kucoin.get_ticker(market)
-                    if ticker_data and ticker_data.get("code") == "200000":
-                        price = float(ticker_data["data"]["price"])
-                except:
-                    pass
+        
+        # For market orders with no price specified, get current price for display
+        if order_type == "market" and price is None:
+            # Get current price for display purposes
+            try:
+                ticker_data = self.kucoin.get_ticker(market)
+                if ticker_data and ticker_data.get("code") == "200000":
+                    price = float(ticker_data["data"]["price"])
+            except:
+                pass
 
         # Show warning and get confirmation before proceeding
         warning = discord.Embed(
@@ -486,36 +390,56 @@ class TradingCommands(commands.Cog):
         warning.add_field(name="Market", value=market.upper(), inline=True)
         warning.add_field(name="Side", value=side.upper(), inline=True)
         warning.add_field(name="Order Type", value=order_type.capitalize(), inline=True)
-        warning.add_field(name="Amount", value=f"{amount}", inline=True)
+        
+        if order_type == "market" and use_funds and side == "buy":
+            warning.add_field(name="Funds to Use", value=f"${amount} USDT", inline=True)
+        else:
+            # Specify what the amount refers to (BTC, ETH, etc.)
+            base_currency = market.split("-")[0]  # Extract base currency from market pair
+            warning.add_field(name="Amount", value=f"{amount} {base_currency}", inline=True)
         
         if order_type == "limit" and price is not None:
-            warning.add_field(name="Price", value=f"${price:.8f}", inline=True)
+            warning.add_field(name="Price", value=f"${price:.2f}", inline=True)
+        elif price is not None:
+            warning.add_field(name="Current Market Price", value=f"${price:.2f} (approximate)", inline=True)
         
-        warning.set_footer(text="Reply with 'yes' to continue or 'no' to cancel")
+        # Add instruction to use emoji reactions instead of text reply
+        warning.set_footer(text="React with ✅ to confirm or ❌ to cancel")
         
-        await ctx.send(embed=warning)
+        # Send the warning message and add reaction buttons
+        message = await ctx.send(embed=warning)
+        await message.add_reaction("✅")
+        await message.add_reaction("❌")
         
-        def check(message):
-            return message.author == ctx.author and message.channel == ctx.channel and message.content.lower() in ["yes", "no"]
+        # Wait for user to click a reaction
+        def check(reaction, user):
+            return (
+                user == ctx.author
+                and reaction.message.id == message.id
+                and str(reaction.emoji) in ["✅", "❌"]
+            )
         
         try:
-            response = await self.bot.wait_for("message", timeout=30, check=check)
-            if response.content.lower() != "yes":
+            reaction, user = await self.bot.wait_for("reaction_add", timeout=10.0, check=check)
+            
+            if str(reaction.emoji) == "✅":
+                # Process the real trade
+                await self._process_real_trade(
+                    ctx,
+                    market,
+                    side,
+                    amount,
+                    price,
+                    order_type,
+                    use_funds
+                )
+            else:
                 await ctx.send("🛑 Order creation cancelled.")
                 return
+                
         except asyncio.TimeoutError:
             await ctx.send("⏱️ No response received. Order creation cancelled.")
             return
-        
-        # Process the real trade
-        await self._process_real_trade(
-            ctx,
-            market,
-            side,
-            amount,
-            price,
-            order_type
-        )
 
     @commands.command(name="ticker")
     async def get_ticker(self, ctx, symbol: str = "BTC-USDT"):
