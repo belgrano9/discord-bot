@@ -174,9 +174,13 @@ class KucoinAPI:
         
         Args:
             account_id: The ID of the account to retrieve
-            
+                
         Returns:
-            JSON response with account details
+            JSON response with account details including:
+            - currency: The currency of the account
+            - balance: Total funds in the account
+            - available: Funds available to withdraw or trade
+            - holds: Funds on hold (not available for use)
         """
         path = f"/api/v1/accounts/{account_id}"
         method = "GET"
@@ -196,8 +200,53 @@ class KucoinAPI:
         
         return json.loads(data.decode("utf-8"))
 
+    def get_account_list(self, currency=None, account_type=None):
+        """
+        Get a list of accounts with optional filtering by currency and account type
+        
+        Args:
+            currency (str, optional): Filter accounts by currency (e.g., 'BTC', 'USDT')
+            account_type (str, optional): Filter accounts by type ('main', 'trade', 'margin', 'trade_hf')
+                
+        Returns:
+            JSON response with a list of accounts containing:
+            - id: The ID of the account
+            - currency: The currency of the account
+            - type: Account type (main, trade, trade_hf, margin)
+            - balance: Total funds in the account
+            - available: Funds available to withdraw or trade
+            - holds: Funds on hold (not available for use)
+        """
+        # Construct query parameters
+        query_params = {}
+        if currency:
+            query_params["currency"] = currency
+        if account_type:
+            query_params["type"] = account_type
+        
+        # Build the path with query parameters
+        path = "/api/v1/accounts"
+        if query_params:
+            path += "?" + urlencode(query_params)
+        
+        method = "GET"
+        
+        # Create signature for authentication
+        payload = method + path
+        headers = self.signer.headers(payload)
+        
+        # Set up the connection using http.client
+        conn = http.client.HTTPSConnection(self.host)
+        conn.request(method, path, "", headers)
+        
+        # Get and process response
+        res = conn.getresponse()
+        data = res.read()
+        conn.close()
+        
+        return json.loads(data.decode("utf-8"))
     ##### SPOT TRADING #####
-     
+    # i cannot place orders unless i have balance in my spot trading 
     def get_ticker(self, symbol="BTC-USDT"):
         """
         Get level 1 orderbook data for a symbol
@@ -345,45 +394,54 @@ class KucoinAPI:
         
         return json.loads(response_data.decode("utf-8"))
      
-    def get_trade_history_spot(self, symbol, order_id=None, side=None, order_type=None, 
-                    last_id=None, limit=20, start_at=None, end_at=None):
+
+    def get_filled_list(self, symbol=None, order_id=None, side=None, order_type=None,
+                    start_at=None, end_at=None, trade_type="TRADE", limit=None, current_page=None):
         """
-        Get a list of the latest spot transaction details
+        Get the recent fills (order execution history)
         
         Args:
-            symbol: Trading pair symbol (e.g., BTC-USDT) - required
-            order_id: Unique order id (optional)
-            side: 'buy' or 'sell' (optional)
-            order_type: 'limit' or 'market' (optional)
-            last_id: ID for pagination (optional)
-            limit: Number of records to return, default 20, max 100 (optional)
-            start_at: Start time in milliseconds (optional)
-            end_at: End time in milliseconds (optional)
-            
+            symbol (str, optional): Limit the list of fills to this symbol
+            order_id (str, optional): Limit the list of fills to this orderId
+                                    (If you specify orderId, other conditions are ignored)
+            side (str, optional): 'buy' or 'sell'
+            order_type (str, optional): 'limit', 'market', 'limit_stop' or 'market_stop'
+            start_at (int, optional): Start time in milliseconds
+            end_at (int, optional): End time in milliseconds
+            trade_type (str, optional): Type of trading, default is "TRADE" (Spot Trading)
+                                    Options: "TRADE", "MARGIN_TRADE", "MARGIN_ISOLATED_TRADE"
+            limit (int, optional): Number of results per request (default varies by endpoint)
+            current_page (int, optional): Current page number
+                
         Returns:
-            JSON response with trade history data
+            JSON response with fills data including pagination info
         """
         # Construct query parameters
-        query_params = {"symbol": symbol}
+        query_params = {}
         
-        # Add optional parameters if provided
+        # Add parameters only if they are provided and not None
         if order_id:
             query_params["orderId"] = order_id
+        if symbol:
+            query_params["symbol"] = symbol
         if side:
             query_params["side"] = side
         if order_type:
             query_params["type"] = order_type
-        if last_id:
-            query_params["lastId"] = last_id
-        if limit:
-            query_params["limit"] = limit
         if start_at:
             query_params["startAt"] = start_at
         if end_at:
             query_params["endAt"] = end_at
+        if trade_type:
+            query_params["tradeType"] = trade_type
+        if limit:
+            query_params["pageSize"] = limit
+        if current_page:
+            query_params["currentPage"] = current_page
         
         # Build the path with query parameters
-        path = f"/api/v1/hf/fills?{urlencode(query_params)}"
+        query_string = urlencode(query_params) if query_params else ""
+        path = f"/api/v1/fills?{query_string}" if query_string else "/api/v1/fills"
         method = "GET"
         
         # Create signature for authentication
@@ -400,56 +458,42 @@ class KucoinAPI:
         conn.close()
         
         return json.loads(data.decode("utf-8"))
-     
+    
+
     #### MARGIN TRADING ##### 
-    def get_margin_trade_history(self, symbol, trade_type, order_id=None, side=None, 
-                           order_type=None, last_id=None, limit=20, start_at=None, end_at=None):
+    def get_isolated_margin_accounts(self, symbol=None, quote_currency="USDT", query_type="ISOLATED"):
         """
-        Get a list of the latest margin transaction details
+        Get isolated margin account information
         
         Args:
-            symbol: Trading pair symbol (e.g., BTC-USDT) - required
-            trade_type: Trade type (MARGIN_TRADE for cross margin, MARGIN_ISOLATED_TRADE for isolated) - required
-            order_id: Unique order id (optional)
-            side: 'buy' or 'sell' (optional)
-            order_type: 'limit' or 'market' (optional)
-            last_id: ID for pagination (optional)
-            limit: Number of records to return, default 20, max 100 (optional)
-            start_at: Start time in milliseconds (optional)
-            end_at: End time in milliseconds (optional)
-            
+            symbol (str, optional): For isolated trading pairs, query all without passing
+            quote_currency (str, optional): Quote currency - supports 'USDT', 'KCS', 'BTC', default 'USDT'
+            query_type (str, optional): Query account type, one of:
+                - ISOLATED: Only query low frequency isolated margin account (default)
+                - ISOLATED_V2: Only query high frequency isolated margin account
+                - ALL: Consistent aggregate query with the web side
+                
         Returns:
-            JSON response with margin trade history data
+            JSON response with isolated margin account data including:
+            - totalAssetOfQuoteCurrency: Total assets in quote currency
+            - totalLiabilityOfQuoteCurrency: Total liability in quote currency
+            - timestamp: Timestamp of the data
+            - assets: Array of assets with symbol, status, debtRatio, baseAsset and quoteAsset information
         """
-        # Validate trade_type
-        valid_trade_types = ["MARGIN_TRADE", "MARGIN_ISOLATED_TRADE"]
-        if trade_type not in valid_trade_types:
-            raise ValueError(f"Invalid trade_type. Must be one of: {', '.join(valid_trade_types)}")
-        
         # Construct query parameters
-        query_params = {
-            "symbol": symbol,
-            "tradeType": trade_type
-        }
-        
-        # Add optional parameters if provided
-        if order_id:
-            query_params["orderId"] = order_id
-        if side:
-            query_params["side"] = side
-        if order_type:
-            query_params["type"] = order_type
-        if last_id:
-            query_params["lastId"] = last_id
-        if limit:
-            query_params["limit"] = limit
-        if start_at:
-            query_params["startAt"] = start_at
-        if end_at:
-            query_params["endAt"] = end_at
+        query_params = {}
+        if symbol:
+            query_params["symbol"] = symbol
+        if quote_currency:
+            query_params["quoteCurrency"] = quote_currency
+        if query_type:
+            query_params["queryType"] = query_type
         
         # Build the path with query parameters
-        path = f"/api/v3/hf/margin/fills?{urlencode(query_params)}"
+        path = "/api/v3/isolated/accounts"
+        if query_params:
+            path += "?" + urlencode(query_params)
+        
         method = "GET"
         
         # Create signature for authentication
@@ -467,67 +511,154 @@ class KucoinAPI:
         
         return json.loads(data.decode("utf-8"))
 
-    def get_margin_closed_orders(self, symbol, trade_type, side=None, order_type=None,
-                           last_id=None, limit=20, start_at=None, end_at=None):
+    def add_margin_order(self, order_type="limit", symbol="BTC-USDT", side="buy", 
+                    price=None, size=None, funds=None, client_oid=None,
+                    margin_model="isolated", auto_borrow=False, auto_repay=False,
+                    time_in_force="GTC", cancel_after=None, post_only=False,
+                    hidden=False, iceberg=False, visible_size=None, stp=None):
         """
-        Get a list of completed margin orders
+        Place a real order in the margin trading system
         
         Args:
-            symbol: Trading pair symbol (e.g., BTC-USDT) - required
-            trade_type: Trade type (MARGIN_TRADE for cross margin, MARGIN_ISOLATED_TRADE for isolated) - required
-            side: 'buy' or 'sell' (optional)
-            order_type: 'limit' or 'market' (optional)
-            last_id: ID for pagination (optional)
-            limit: Number of records to return, default 20, max 100 (optional)
-            start_at: Start time in milliseconds (optional)
-            end_at: End time in milliseconds (optional)
+            order_type: Order type - 'limit' or 'market'
+            symbol: Trading pair symbol (e.g., BTC-USDT)
+            side: 'buy' or 'sell'
+            price: Specify price for limit orders
+            size: Quantity to buy/sell
+            funds: Funds to use (for market orders, use either size or funds)
+            client_oid: Client-generated order ID
+            margin_model: "cross" or "isolated" (default)
+            auto_borrow: Whether to automatically borrow if balance is insufficient
+            auto_repay: Whether to automatically repay when position is closed
+            time_in_force: Order timing strategy - GTC, GTT, IOC, FOK
+            cancel_after: Cancel after n seconds (for GTT orders)
+            post_only: Whether the order is post-only
+            hidden: Whether the order is hidden
+            iceberg: Whether the order is an iceberg order
+            visible_size: Maximum visible quantity in iceberg orders
+            stp: Self trade prevention strategy - CN, CO, CB, DC
             
         Returns:
-            JSON response with closed margin orders data
+            JSON response with orderId and potentially borrowSize and loanApplyId
         """
-        # Validate trade_type
-        valid_trade_types = ["MARGIN_TRADE", "MARGIN_ISOLATED_TRADE"]
-        if trade_type not in valid_trade_types:
-            raise ValueError(f"Invalid trade_type. Must be one of: {', '.join(valid_trade_types)}")
-        
-        # Construct query parameters
-        query_params = {
+        # Prepare order data
+        data = {
+            "type": order_type,
             "symbol": symbol,
-            "tradeType": trade_type
+            "side": side
         }
         
-        # Add optional parameters if provided
-        if side:
-            query_params["side"] = side
-        if order_type:
-            query_params["type"] = order_type
-        if last_id:
-            query_params["lastId"] = last_id
-        if limit:
-            query_params["limit"] = limit
-        if start_at:
-            query_params["startAt"] = start_at
-        if end_at:
-            query_params["endAt"] = end_at
+        # Add client order ID if provided, otherwise generate one
+        if client_oid:
+            data["clientOid"] = client_oid
+        else:
+            data["clientOid"] = str(uuid.uuid4())
         
-        # Build the path with query parameters
-        path = f"/api/v3/hf/margin/orders/done?{urlencode(query_params)}"
-        method = "GET"
+        # Set margin model (cross or isolated)
+        data["marginModel"] = margin_model
+        
+        # Add auto-borrow and auto-repay if specified
+        if auto_borrow:
+            data["autoBorrow"] = True
+        
+        if auto_repay:
+            data["autoRepay"] = True
+        
+        # Add STP if specified
+        if stp:
+            data["stp"] = stp
+        
+        # Add parameters based on order type
+        if order_type == "limit":
+            if price is None:
+                raise ValueError("Price is required for limit orders")
+            if size is None:
+                raise ValueError("Size is required for limit orders")
+            
+            data["price"] = str(price)
+            data["size"] = str(size)
+            
+            # Add optional parameters for limit orders
+            if time_in_force:
+                data["timeInForce"] = time_in_force
+            
+            if cancel_after and time_in_force == "GTT":
+                data["cancelAfter"] = cancel_after
+            
+            if post_only:
+                data["postOnly"] = post_only
+            
+            if hidden:
+                data["hidden"] = hidden
+            
+            if iceberg:
+                data["iceberg"] = iceberg
+                if visible_size:
+                    data["visibleSize"] = str(visible_size)
+        
+        elif order_type == "market":
+            # For market orders, either size or funds must be provided
+            if size is not None:
+                data["size"] = str(size)
+            elif funds is not None:
+                data["funds"] = str(funds)
+            else:
+                raise ValueError("Either size or funds must be provided for market orders")
+        
+        # Convert data to JSON string
+        body = json.dumps(data)
+        
+        # Prepare request
+        method = "POST"
+        endpoint = "/api/v1/margin/order"
         
         # Create signature for authentication
-        payload = method + path
+        payload = method + endpoint + body
         headers = self.signer.headers(payload)
+        headers["Content-Type"] = "application/json"
         
-        # Set up the connection using http.client
+        # Make request using http.client
         conn = http.client.HTTPSConnection(self.host)
-        conn.request(method, path, "", headers)
+        conn.request(method, endpoint, body, headers)
         
         # Get and process response
         res = conn.getresponse()
-        data = res.read()
+        response_data = res.read()
         conn.close()
         
-        return json.loads(data.decode("utf-8"))
+        return json.loads(response_data.decode("utf-8"))
+    
+    def cancel_order_by_id(self, order_id):
+        """
+        Cancel a single order by its order ID
+        
+        Args:
+            order_id (str): The unique order ID assigned by the server
+                
+        Returns:
+            JSON response with the cancelled order IDs if successful
+            
+        Example:
+            cancel_result = kucoin_api.cancel_order_by_id("5bd6e9286d99522a52e458de")
+        """
+        # Prepare request
+        method = "DELETE"
+        endpoint = f"/api/v1/orders/{order_id}"
+        
+        # Create signature for authentication
+        payload = method + endpoint
+        headers = self.signer.headers(payload)
+        
+        # Make request using http.client
+        conn = http.client.HTTPSConnection(self.host)
+        conn.request(method, endpoint, "", headers)
+        
+        # Get and process response
+        res = conn.getresponse()
+        response_data = res.read()
+        conn.close()
+        
+        return json.loads(response_data.decode("utf-8"))
 
 if __name__ == '__main__':
     key = os.getenv("KUCOIN_API_KEY", "")
@@ -535,21 +666,21 @@ if __name__ == '__main__':
     passphrase = os.getenv("KUCOIN_API_PASSPHRASE", "")
     account_id = os.getenv("KUCOIN_ID", "")
 
-
-    from datetime import datetime, timedelta
-
     kucoin_api = KucoinAPI(key, secret, passphrase)
-    # Calculate timestamp for yesterday and today
-    end_time = int(datetime.now().timestamp() * 1000)
-    start_time = int((datetime.now() - timedelta(days=2)).timestamp() * 1000)
 
-    # Test with explicit time range
-    order_history = kucoin_api.get_margin_closed_orders(
-        "BTC-USDT", 
-        "MARGIN_ISOLATED_TRADE",
-        start_at=start_time,
-        end_at=end_time
-    )
-    print(json.dumps(order_history, indent=2))
+    balance = kucoin_api.get_isolated_margin_accounts(symbol="BTC-USDT")
+    n = balance["data"]["assets"][0]["baseAsset"]["available"] 
+    print(balance["data"]["assets"][0])
+
+    #buy_order = kucoin_api.add_margin_order(symbol="BTC-USDT", side="buy", size = 0.00001178, price=84750, order_type="limit")
+                
+    #buy_order_id = "67cd7f70dd862b0007a59abb" #buy_order["data"]["orderId"]
+    #print(buy_order_id)
+
+
+    #kucoin_api.cancel_order_by_id(buy_order_id)
+
+    #sell_order = kucoin_api.add_margin_order(symbol="BTC-USDT", side="sell", size=n, order_type="market")
+    #print(sell_order)
 
 
