@@ -245,7 +245,7 @@ class KucoinAPI:
         
         Args:
             currency: Filter accounts by currency (e.g., 'BTC', 'USDT')
-            account_type: Filter by account type ('main', 'trade', 'margin', 'trade_hf')
+            account_type: Filter by account type ('main', 'trade', 'margin','isolation', 'trade_hf')
                 
         Returns:
             List of accounts with balance information
@@ -496,50 +496,69 @@ class KucoinAPI:
         )
     
     def add_margin_order(self, 
-                        order_type: str = "limit", 
-                        symbol: str = "BTC-USDT", 
-                        side: str = "buy", 
-                        price: str = None, 
-                        size: str = None, 
-                        funds: str = None, 
-                        client_oid: str = None,
-                        margin_model: str = "isolated", 
-                        auto_borrow: bool = False, 
-                        auto_repay: bool = False,
-                        **kwargs) -> Dict[str, Any]:
+                     symbol: str,
+                     side: str,
+                     client_oid: str = None,
+                     order_type: str = "limit",
+                     price: str = None,
+                     size: str = None,
+                     funds: str = None,
+                     is_isolated: bool = False,
+                     auto_borrow: bool = False,
+                     auto_repay: bool = False,
+                     stp: str = None,
+                     time_in_force: str = "GTC",
+                     cancel_after: int = None,
+                     post_only: bool = False,
+                     hidden: bool = False,
+                     iceberg: bool = False,
+                     visible_size: str = None,
+                     remark: str = None) -> Dict[str, Any]:
         """
-        Place a real order in the margin trading system.
+        Place an order in the margin trading system (cross or isolated).
         
         Args:
-            order_type: Order type - 'limit' or 'market'
             symbol: Trading pair symbol (e.g., BTC-USDT)
             side: 'buy' or 'sell'
-            price: Specify price for limit orders
+            client_oid: Client-generated order ID (recommended to use UUID)
+            order_type: Order type - 'limit' or 'market'
+            price: Price for limit orders
             size: Quantity to buy/sell
-            funds: Funds to use (for market orders, use either size or funds)
-            client_oid: Client-generated order ID
-            margin_model: "cross" or "isolated" (default)
-            auto_borrow: Whether to automatically borrow if balance is insufficient
-            auto_repay: Whether to automatically repay when position is closed
-            **kwargs: Additional order parameters
+            funds: Funds to use (for market orders, alternative to size)
+            is_isolated: True for isolated margin, False for cross margin
+            auto_borrow: Whether to auto-borrow if insufficient balance
+            auto_repay: Whether to auto-repay when closing position
+            stp: Self-trade prevention strategy - 'CN', 'CO', 'CB', or 'DC'
+            time_in_force: Order timing strategy - 'GTC', 'GTT', 'IOC', 'FOK'
+            cancel_after: Cancel after n seconds (for GTT orders)
+            post_only: Whether the order is post-only
+            hidden: Whether the order is hidden
+            iceberg: Whether the order is an iceberg order
+            visible_size: Maximum visible quantity for iceberg orders
+            remark: Order remarks
             
         Returns:
-            Margin order creation response
+            Order response including orderId, clientOid, and potentially
+            borrowSize and loanApplyId if auto_borrow is enabled
         """
         # Prepare order data
         data = {
-            "type": order_type,
             "symbol": symbol,
             "side": side,
             "clientOid": client_oid or str(uuid.uuid4()),
-            "marginModel": margin_model
+            "type": order_type,
+            "isIsolated": is_isolated,
+            "autoBorrow": auto_borrow,
+            "autoRepay": auto_repay
         }
         
-        # Add auto-borrow and auto-repay if specified
-        if auto_borrow:
-            data["autoBorrow"] = True
-        if auto_repay:
-            data["autoRepay"] = True
+        # Add STP if specified
+        if stp:
+            data["stp"] = stp
+            
+        # Add remark if specified
+        if remark:
+            data["remark"] = remark
         
         # Add parameters based on order type
         if order_type == "limit":
@@ -551,10 +570,23 @@ class KucoinAPI:
             data["price"] = str(price)
             data["size"] = str(size)
             
-            # Add optional parameters from kwargs
-            for key in ["timeInForce", "cancelAfter", "postOnly", "hidden", "iceberg", "visibleSize", "stp"]:
-                if key in kwargs:
-                    data[key] = kwargs[key]
+            # Add optional parameters for limit orders
+            if time_in_force:
+                data["timeInForce"] = time_in_force
+            
+            if cancel_after and time_in_force == "GTT":
+                data["cancelAfter"] = cancel_after
+            
+            if post_only:
+                data["postOnly"] = post_only
+            
+            if hidden:
+                data["hidden"] = hidden
+            
+            if iceberg:
+                data["iceberg"] = iceberg
+                if visible_size:
+                    data["visibleSize"] = str(visible_size)
         
         elif order_type == "market":
             # For market orders, either size or funds must be provided
@@ -565,9 +597,10 @@ class KucoinAPI:
             else:
                 raise ValueError("Either size or funds must be provided for market orders")
         
+        # Make the API request
         return self._make_request(
             method="POST",
-            endpoint="/api/v1/margin/order",
+            endpoint="/api/v3/hf/margin/order",
             data=data
         )
     
@@ -586,6 +619,39 @@ class KucoinAPI:
             endpoint=f"/api/v1/orders/{order_id}"
         )
     
+    def get_margin_open_orders(self, 
+                           symbol: str, 
+                           trade_type: str = "MARGIN_ISOLATED_TRADE") -> Dict[str, Any]:
+        """
+        Get all active margin orders for a symbol.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., BTC-USDT)
+            trade_type: Type of margin trading
+                    "MARGIN_TRADE" - cross margin trading order
+                    "MARGIN_ISOLATED_TRADE" - isolated margin trading order
+            
+        Returns:
+            List of active margin orders sorted by latest update time
+        """
+        # Validate trade_type parameter
+        valid_trade_types = ["MARGIN_TRADE", "MARGIN_ISOLATED_TRADE"]
+        if trade_type not in valid_trade_types:
+            raise ValueError(f"trade_type must be one of {valid_trade_types}")
+            
+        # Prepare query parameters
+        params = {
+            "symbol": symbol,
+            "tradeType": trade_type
+        }
+        
+        # Make the API request
+        return self._make_request(
+            method="GET",
+            endpoint="/api/v3/hf/margin/orders/active",
+            params=params
+        )
+
     ###################
     # TRADE HISTORY   #
     ###################
@@ -647,9 +713,14 @@ class KucoinAPI:
             params=params
         )
 
+    ####################
+    #   POSITIONS      #
+    ####################
+    
+    # To get open positions
 
 if __name__ == '__main__':
-    # Example usage
+    
     import os
     
     key = os.getenv("KUCOIN_API_KEY", "")
@@ -658,14 +729,12 @@ if __name__ == '__main__':
     
     kucoin_api = KucoinAPI(key, secret, passphrase)
     
-    # Get isolated margin accounts
     balance = kucoin_api.get_isolated_margin_accounts(symbol="BTC-USDT")
     
-    if balance.get("code") == "200000" and "data" in balance:
-        print("Isolated Margin Account:")
-        print(balance["data"]["assets"][0])
+    print(balance["data"]["assets"][0])
     
-    # Get account list
-    accounts = kucoin_api.get_account_list()
-    if accounts.get("code") == "200000" and "data" in accounts:
-        print(f"\nFound {len(accounts['data'])} accounts")
+    buy = kucoin_api.add_margin_order("BTC-USDT", side = "buy", order_type="market", funds = 1, is_isolated=True)
+    print(buy)
+
+
+    

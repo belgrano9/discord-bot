@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime
 import os
 from kucoin_handler import KucoinAPI
+import pyperclip
+import uuid
 
 
 class TradingCommands(commands.Cog):
@@ -17,6 +19,8 @@ class TradingCommands(commands.Cog):
             api_secret=os.getenv("KUCOIN_API_SECRET", ""),
             passphrase=os.getenv("KUCOIN_API_PASSPHRASE", "")
         )
+        # Dictionary to store order IDs for reactions
+        self.order_id_messages = {}
 
     async def _collect_trade_parameters(self, ctx, is_real=False):
         """Collect trade parameters interactively
@@ -54,8 +58,6 @@ class TradingCommands(commands.Cog):
         # 1. Ask for market/trading pair
         def validate_market(value):
             try:
-                # KuCoin doesn't have a direct "get markets" method like Bitvavo
-                # We'll accept any string in the format "XXX-YYY" for now
                 value = value.upper()
                 if "-" in value and len(value.split("-")) == 2:
                     return True, ""
@@ -162,6 +164,7 @@ class TradingCommands(commands.Cog):
             side = side.lower()
             order_type = order_type.lower()
             market = market.upper()
+            client_oid = str(uuid.uuid4())
             
             # Create an order based on the type
             if order_type == "limit":
@@ -172,12 +175,13 @@ class TradingCommands(commands.Cog):
                 response = self.kucoin.add_margin_order(
                     symbol=market,
                     side=side,
+                    client_oid=client_oid,
                     order_type="limit",
-                    size=str(amount),
                     price=str(price),
-                    margin_model="isolated",  # Using isolated margin trading
-                    auto_borrow=False,        # Auto-borrow if needed
-                    time_in_force="GTC"      # Good Till Canceled
+                    size=str(amount),
+                    is_isolated=True,  # Using isolated margin trading
+                    auto_borrow=False,  # Auto-borrow if needed
+                    time_in_force="GTC"  # Good Till Canceled
                 )
             else:  # market order
                 if use_funds and side == "buy":
@@ -185,20 +189,22 @@ class TradingCommands(commands.Cog):
                     response = self.kucoin.add_margin_order(
                         symbol=market,
                         side=side,
+                        client_oid=client_oid,
                         order_type="market",
-                        funds=str(amount),    # Use amount as funds
-                        margin_model="isolated", 
-                        auto_borrow=False      
+                        funds=str(amount),  # Use amount as funds
+                        is_isolated=True,
+                        auto_borrow=False
                     )
                 else:
                     # Use size parameter (default behavior, and required for sell)
                     response = self.kucoin.add_margin_order(
                         symbol=market,
                         side=side,
+                        client_oid=client_oid,
                         order_type="market",
-                        size=str(amount),     # Use amount as size
-                        margin_model="isolated", 
-                        auto_borrow=False      
+                        size=str(amount),  # Use amount as size
+                        is_isolated=True,
+                        auto_borrow=False
                     )
             
             # Check if the order was successful
@@ -224,11 +230,14 @@ class TradingCommands(commands.Cog):
                 if order_type == "limit" and price:
                     embed.add_field(name="Price", value=f"${price}", inline=True)
                 
-                # Add response data
+                # Add response data and order ID for copying
+                order_id = None
                 if "data" in response:
                     data = response["data"]
                     if "orderId" in data:
-                        embed.add_field(name="Order ID", value=data["orderId"], inline=False)
+                        order_id = data["orderId"]
+                        embed.add_field(name="Order ID", value=f"`{order_id}`", inline=False)
+                        embed.set_footer(text="Click 📋 below to copy the Order ID")
                     
                     # Add borrow details if included in response
                     if "borrowSize" in data:
@@ -236,7 +245,15 @@ class TradingCommands(commands.Cog):
                     if "loanApplyId" in data:
                         embed.add_field(name="Loan ID", value=data["loanApplyId"], inline=True)
                 
-                await ctx.send(embed=embed)
+                # Send the message with the embed
+                message = await ctx.send(embed=embed)
+                
+                # If we have an order ID, add the clipboard emoji reaction
+                if order_id:
+                    await message.add_reaction("📋")
+                    # Store the message ID and order ID for later use
+                    self.order_id_messages[message.id] = order_id
+                
                 return True
                 
             else:
@@ -249,6 +266,32 @@ class TradingCommands(commands.Cog):
             await ctx.send(f"❌ Error placing order: {str(e)}")
             return False
     
+    @commands.Cog.listener()
+    async def on_reaction_add(self, reaction, user):
+        """Handle reaction adds for copying order IDs"""
+        # Ignore bot's own reactions
+        if user.bot:
+            return
+            
+        # Check if this is a clipboard emoji on one of our order messages
+        if str(reaction.emoji) == "📋" and reaction.message.id in self.order_id_messages:
+            order_id = self.order_id_messages[reaction.message.id]
+            
+            # Send the order ID as a private message to the user
+            try:
+                await user.send(f"**Order ID for reference:** `{order_id}`\nYou can use this ID with the !cancel_order command.")
+                # Also notify in the channel that the ID was sent
+                await reaction.message.channel.send(
+                    f"{user.mention} I've sent you the order ID in a private message.",
+                    delete_after=10
+                )
+            except discord.Forbidden:
+                # If we can't DM the user, just post it in the channel
+                await reaction.message.channel.send(
+                    f"{user.mention} Here's the order ID for reference: `{order_id}`",
+                    delete_after=20
+                )
+
     @commands.command(name="testtrade")
     async def test_trade(
         self, ctx, market: str = "BTC-USDT", side: str = "buy", amount: float = 0.001, 
@@ -282,22 +325,39 @@ class TradingCommands(commands.Cog):
                 await ctx.send(f"❌ Error getting current price: {str(e)}")
                 return
 
-        await self._process_trade(ctx, market, side, amount, price, order_type, is_real=False)
-
-    @commands.command(name="interactivetrade")
-    async def interactive_trade(self, ctx):
-        """Interactive trading command that asks for each trade parameter including order type"""
-        trade_data = await self._collect_trade_parameters(ctx, is_real=False)
-        if trade_data:
-            await self._process_trade(
-                ctx,
-                trade_data["market"],
-                trade_data["side"],
-                trade_data["amount"],
-                trade_data.get("price"),  # Price might be None for market orders
-                trade_data["order_type"],
-                is_real=False,
-            )
+        # Since this is a test trade, create a simulated response
+        client_oid = str(uuid.uuid4())
+        test_order_id = f"test-{int(datetime.now().timestamp())}"
+        
+        # Create a success embed
+        color = discord.Color.green() if side.lower() == "buy" else discord.Color.red()
+        embed = discord.Embed(
+            title=f"🧪 TEST {side.upper()} Order Simulation",
+            description=f"Your test {order_type} order would be processed as follows",
+            color=color
+        )
+        
+        # Add order details
+        embed.add_field(name="Market", value=market.upper(), inline=True)
+        embed.add_field(name="Type", value=order_type.capitalize(), inline=True)
+        embed.add_field(name="Side", value=side.upper(), inline=True)
+        embed.add_field(name="Amount", value=str(amount), inline=True)
+        
+        if order_type == "limit" and price:
+            embed.add_field(name="Price", value=f"${price}", inline=True)
+            embed.add_field(name="Total Value", value=f"${amount * price:.2f}", inline=True)
+        
+        # Add test order ID
+        embed.add_field(name="Test Order ID", value=f"`{test_order_id}`", inline=False)
+        embed.set_footer(text="This is a test - no actual order was placed")
+        
+        # Send the message with the embed
+        message = await ctx.send(embed=embed)
+        
+        # Add the clipboard emoji reaction for testing purposes
+        await message.add_reaction("📋")
+        # Store the test order ID
+        self.order_id_messages[message.id] = test_order_id
 
     @commands.command(name="realorder")
     async def real_order(self, ctx, market: str = None, side: str = None, amount: str = None, 
@@ -1167,8 +1227,14 @@ class TradingCommands(commands.Cog):
             if "orderId" in trade:
                 order_id = trade["orderId"]
                 embed.description = f"Order ID: {order_id}"
-            
-            await ctx.send(embed=embed)
+                
+                # Add this as a message to potentially copy
+                message = await ctx.send(embed=embed)
+                await message.add_reaction("📋")
+                # Store the order ID
+                self.order_id_messages[message.id] = order_id
+            else:
+                await ctx.send(embed=embed)
             
         except Exception as e:
             await ctx.send(f"❌ Error retrieving last trade: {str(e)}")
@@ -1275,6 +1341,7 @@ class TradingCommands(commands.Cog):
         except Exception as e:
             # Handle any exceptions during the process
             await ctx.send(f"❌ Error during order cancellation: {str(e)}")
+
 
 async def setup(bot):
     """Add the TradingCommands cog to the bot"""

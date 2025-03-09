@@ -13,6 +13,7 @@ polars = "^1.23.0"
 python-bitvavo-api = "^1.4.2"
 gradio = "^5.20.1"
 matplotlib = "^3.10.1"
+pyperclip = "^1.9.0"
 
 
 [build-system]
