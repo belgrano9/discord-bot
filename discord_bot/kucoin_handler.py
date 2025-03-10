@@ -322,6 +322,32 @@ class KucoinAPI:
             params=params
         )
     
+    def get_cross_margin_accounts(self, 
+                                    quote_currency: str = "USDT", 
+                                    query_type: str = "MARGIN") -> Dict[str, Any]:
+        """
+        Get cross margin account information.
+        
+        Args:
+            quote_currency: Quote currency, e.g., USDT (default)
+            query_type: Account type - "MARGIN" (default), "MARGIN_V2", or "ALL"
+                
+        Returns:
+            Isolated margin account data including assets and liabilities
+        """
+        params = {
+            "quoteCurrency": quote_currency,
+            "queryType": query_type
+        }
+        
+
+            
+        return self._make_request(
+            method="GET",
+            endpoint="/api/v3/margin/accounts",
+            params=params
+        )
+
     ###################
     # ORDER API       #
     ###################
@@ -651,7 +677,352 @@ class KucoinAPI:
             endpoint="/api/v3/hf/margin/orders/active",
             params=params
         )
+    
+    def add_stop_order(self,
+                  symbol: str,
+                  side: str,
+                  stop_price: str,
+                  order_type: str = "limit",
+                  price: str = None,
+                  size: str = None,
+                  funds: str = None,
+                  client_oid: str = None,
+                  time_in_force: str = "GTC",
+                  cancel_after: int = -1,
+                  post_only: bool = False,
+                  hidden: bool = False,
+                  iceberg: bool = False,
+                  visible_size: str = None,
+                  remark: str = None,
+                  stp: str = None,
+                  trade_type: str = "TRADE") -> Dict[str, Any]:
+        """
+        Place a stop order to the Spot/Margin trading system.
+        The maximum untriggered stop orders for a single trading pair in one account is 20.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., BTC-USDT)
+            side: 'buy' or 'sell'
+            stop_price: The trigger price
+            order_type: Order type - 'limit' or 'market' (default: 'limit')
+            price: Price for limit orders (required if order_type is 'limit')
+            size: Quantity to buy/sell (required for limit orders, or for market buy orders)
+            funds: Funds to use (alternative to size for market orders)
+            client_oid: Client-generated order ID (recommend to use UUID)
+            time_in_force: Time in force strategy - 'GTC', 'GTT', 'IOC', 'FOK' (default: 'GTC')
+            cancel_after: Cancel after n seconds, only for GTT orders (default: -1, not cancelled)
+            post_only: Whether the order is post-only (default: False)
+            hidden: Whether the order is hidden (default: False)
+            iceberg: Whether the order is an iceberg order (default: False)
+            visible_size: Maximum visible quantity for iceberg orders
+            remark: Order remarks, max 20 characters
+            stp: Self-trade prevention strategy - 'DC', 'CO', 'CN', 'CB'
+            trade_type: Type of trading - 'TRADE' (Spot), 'MARGIN_TRADE' (Cross Margin),
+                        'MARGIN_ISOLATED_TRADE' (Isolated Margin) (default: 'TRADE')
+        
+        Returns:
+            Dictionary containing the order ID
+        """
+        # Validate required parameters
+        if not symbol or not side or not stop_price:
+            raise ValueError("Symbol, side, and stop_price are required parameters")
+        
+        if order_type not in ["limit", "market"]:
+            raise ValueError("Order type must be either 'limit' or 'market'")
+        
+        if side not in ["buy", "sell"]:
+            raise ValueError("Side must be either 'buy' or 'sell'")
+        
+        # Validate parameters based on order type
+        if order_type == "limit" and price is None:
+            raise ValueError("Price is required for limit orders")
+        
+        if order_type == "limit" and size is None:
+            raise ValueError("Size is required for limit orders")
+        
+        if order_type == "market" and size is None and funds is None:
+            raise ValueError("Either size or funds must be provided for market orders")
+        
+        # Prepare order data
+        data = {
+            "symbol": symbol,
+            "side": side,
+            "stopPrice": stop_price,
+            "type": order_type,
+            "clientOid": client_oid or str(uuid.uuid4())
+        }
+        
+        # Add price for limit orders
+        if order_type == "limit" and price is not None:
+            data["price"] = price
+        
+        # Add size if provided
+        if size is not None:
+            data["size"] = size
+        
+        # Add funds if provided (for market orders)
+        if funds is not None and order_type == "market":
+            data["funds"] = funds
+        
+        # Add optional parameters if specified
+        if time_in_force:
+            data["timeInForce"] = time_in_force
+        
+        if cancel_after != -1:
+            data["cancelAfter"] = cancel_after
+        
+        if post_only:
+            data["postOnly"] = post_only
+        
+        if hidden:
+            data["hidden"] = hidden
+        
+        if iceberg:
+            data["iceberg"] = iceberg
+            if visible_size:
+                data["visibleSize"] = visible_size
+        
+        if remark:
+            data["remark"] = remark
+        
+        if stp:
+            data["stp"] = stp
+        
+        if trade_type:
+            data["tradeType"] = trade_type
+        
+        # Make the API request
+        return self._make_request(
+            method="POST",
+            endpoint="/api/v1/stop-order",
+            data=data
+        )
 
+
+    ###################
+    #       DEBT      #
+    ###################
+    def get_borrow_history(self,
+                      currency: str,
+                      is_isolated: bool = False,
+                      symbol: str = None,
+                      order_no: str = None,
+                      start_time: int = None,
+                      end_time: int = None,
+                      current_page: int = 1,
+                      page_size: int = 50) -> Dict[str, Any]:
+        """
+        Get the borrowing orders for cross and isolated margin accounts.
+        
+        Args:
+            currency: The currency to query (e.g., BTC, ETH, KCS)
+            is_isolated: True for isolated margin, False for cross margin (default: False)
+            symbol: Trading pair symbol, mandatory for isolated margin account (e.g., BTC-USDT)
+            order_no: Borrow Order ID to filter by
+            start_time: Start time in milliseconds 
+                    (if not provided or less than 1680278400000, defaults to April 1, 2023)
+            end_time: End time in milliseconds
+            current_page: Current query page, starting from 1 (default: 1)
+            page_size: Number of results per page, between 10 and 500 (default: 50)
+        
+        Returns:
+            Dictionary containing borrowing history data including pagination info and items
+        """
+        # Prepare query parameters
+        params = {
+            "currency": currency
+        }
+        
+        # Add optional parameters if provided
+        if is_isolated is not None:
+            params["isIsolated"] = is_isolated
+        
+        if symbol:
+            params["symbol"] = symbol
+        
+        if order_no:
+            params["orderNo"] = order_no
+        
+        if start_time:
+            params["startTime"] = start_time
+        
+        if end_time:
+            params["endTime"] = end_time
+        
+        if current_page:
+            params["currentPage"] = current_page
+        
+        if page_size:
+            # Ensure page_size is within allowed limits (10-500)
+            page_size = max(10, min(500, page_size))
+            params["pageSize"] = page_size
+        
+        # Make the API request
+        return self._make_request(
+            method="GET",
+            endpoint="/api/v3/margin/borrow",
+            params=params
+        )
+
+    def repay_margin_loan(self,
+                     currency: str,
+                     size: float,
+                     symbol: str = None,
+                     is_isolated: bool = False,
+                     is_hf: bool = False) -> Dict[str, Any]:
+        """
+        Initiate an application for cross or isolated margin repayment.
+        
+        Args:
+            currency: The currency to repay (e.g., BTC, ETH, USDT)
+            size: Amount to repay
+            symbol: Trading pair symbol, mandatory for isolated margin account (e.g., BTC-USDT)
+            is_isolated: True for isolated margin, False for cross margin (default: False)
+            is_hf: True for high frequency repayment, False for low frequency (default: False)
+        
+        Returns:
+            Dictionary containing repayment details including orderNo and actualSize
+        """
+        # Prepare request data
+        data = {
+            "currency": currency,
+            "size": size
+        }
+        
+        # Add optional parameters if applicable
+        if symbol:
+            data["symbol"] = symbol
+        
+        if is_isolated is not None:
+            data["isIsolated"] = is_isolated
+        
+        if is_hf is not None:
+            data["isHf"] = is_hf
+        
+        # Make the API request
+        return self._make_request(
+            method="POST",
+            endpoint="/api/v3/margin/repay",
+            data=data
+        )
+
+    def add_margin_order_v1(self, 
+                     symbol: str,
+                     side: str,
+                     client_oid: str = None,
+                     order_type: str = "limit",
+                     price: str = None,
+                     size: str = None,
+                     funds: str = None,
+                     margin_model: str = "cross",
+                     auto_borrow: bool = False,
+                     auto_repay: bool = False,
+                     stp: str = None,
+                     time_in_force: str = "GTC",
+                     cancel_after: int = None,
+                     post_only: bool = False,
+                     hidden: bool = False,
+                     iceberg: bool = False,
+                     visible_size: str = None,
+                     remark: str = None) -> Dict[str, Any]:
+        """
+        Place an order in the margin trading system (v1 endpoint).
+        
+        Args:
+            symbol: Trading pair symbol (e.g., ETH-BTC)
+            side: 'buy' or 'sell'
+            client_oid: Client-generated order ID (recommend to use UUID)
+            order_type: Order type - 'limit' or 'market'
+            price: Price for limit orders
+            size: Quantity to buy/sell
+            funds: Funds to use (for market orders, alternative to size)
+            margin_model: 'cross' (cross mode) or 'isolated' (isolated mode)
+            auto_borrow: Whether to auto-borrow if insufficient balance
+            auto_repay: Whether to auto-repay when closing position
+            stp: Self-trade prevention strategy - 'CN', 'CO', 'CB', or 'DC'
+            time_in_force: Order timing strategy - 'GTC', 'GTT', 'IOC', 'FOK'
+            cancel_after: Cancel after n seconds (for GTT orders)
+            post_only: Whether the order is post-only
+            hidden: Whether the order is hidden
+            iceberg: Whether the order is an iceberg order
+            visible_size: Maximum visible quantity for iceberg orders
+            remark: Order remarks
+            
+        Returns:
+            Dictionary containing orderId, possibly borrowSize and loanApplyId
+        """
+        # Prepare order data
+        data = {
+            "symbol": symbol,
+            "side": side,
+            "clientOid": client_oid or str(uuid.uuid4()),
+        }
+        
+        # Add order type if specified
+        if order_type:
+            data["type"] = order_type
+        
+        # Add margin model
+        if margin_model:
+            data["marginModel"] = margin_model
+        
+        # Add auto-borrow and auto-repay flags
+        if auto_borrow:
+            data["autoBorrow"] = auto_borrow
+        if auto_repay:
+            data["autoRepay"] = auto_repay
+        
+        # Add STP if specified
+        if stp:
+            data["stp"] = stp
+        
+        # Add remark if specified
+        if remark:
+            data["remark"] = remark
+        
+        # Add parameters based on order type
+        if order_type == "limit":
+            if price is None:
+                raise ValueError("Price is required for limit orders")
+            if size is None:
+                raise ValueError("Size is required for limit orders")
+            
+            data["price"] = str(price)
+            data["size"] = str(size)
+            
+            # Add optional parameters for limit orders
+            if time_in_force:
+                data["timeInForce"] = time_in_force
+            
+            if cancel_after and time_in_force == "GTT":
+                data["cancelAfter"] = cancel_after
+            
+            if post_only:
+                data["postOnly"] = post_only
+            
+            if hidden:
+                data["hidden"] = hidden
+            
+            if iceberg:
+                data["iceberg"] = iceberg
+                if visible_size:
+                    data["visibleSize"] = str(visible_size)
+        
+        elif order_type == "market":
+            # For market orders, either size or funds must be provided
+            if size is not None:
+                data["size"] = str(size)
+            elif funds is not None:
+                data["funds"] = str(funds)
+            else:
+                raise ValueError("Either size or funds must be provided for market orders")
+        
+        # Make the API request
+        return self._make_request(
+            method="POST",
+            endpoint="/api/v1/margin/order",
+            data=data
+        )
     ###################
     # TRADE HISTORY   #
     ###################
@@ -729,12 +1100,22 @@ if __name__ == '__main__':
     
     kucoin_api = KucoinAPI(key, secret, passphrase)
     
-    balance = kucoin_api.get_isolated_margin_accounts(symbol="BTC-USDT")
+    balance = kucoin_api.get_cross_margin_accounts(quote_currency="USDT")
     
-    print(balance["data"]["assets"][0])
-    
-    buy = kucoin_api.add_margin_order("BTC-USDT", side = "buy", order_type="market", funds = 1, is_isolated=True)
-    print(buy)
+    print(balance["data"]["accounts"][0])
+    n_liab = balance["data"]["accounts"][0]["liability"]
+    n_dispo = balance["data"]["accounts"][0]["available"]
+
+    #buy = kucoin_api.add_margin_order_v1("BTC-USDT", side = "buy", order_type="market", funds = 1, margin_model="cross", auto_borrow=True,)
+    #print(buy)
+    #sell = kucoin_api.add_margin_order_v1("BTC-USDT", side = "sell", order_type="limit", , margin_model="cross", auto_borrow=True,)
+    #print(sell)
+
+    stop = kucoin_api.add_stop_order("BTC-USDT", side = "buy", order_type="market", stop_price="79555",funds="1", trade_type="MARGIN_ISOLATED_TRADE", remark="bot test stop order buy")
+    print(stop)
 
 
+    #n_borrow = kucoin_api.get_borrow_history(currency="BTC")["data"]["items"][0]["size"]
+    #currency =kucoin_api.get_borrow_history(currency="BTC")["data"]["items"][0]["currency"]
     
+    #print(kucoin_api.repay_margin_loan(currency=currency, size=n_borrow))

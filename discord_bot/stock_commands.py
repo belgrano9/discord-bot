@@ -3,7 +3,6 @@ import discord
 from discord.ext import commands
 from discord import Embed
 import polars as pl
-from typing import List, Dict, Any
 
 # Import your API classes
 from api import FinancialAPI, PricesAPI
