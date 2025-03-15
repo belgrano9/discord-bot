@@ -1,12 +1,16 @@
 import discord
 from discord.ext import commands, tasks
 import asyncio
+from typing import Dict, List, Optional, Union
 import json
 import os
 from api import PricesAPI
 from datetime import datetime
 from config import ALERT_CHANNEL_ID, CHECK_INTERVAL
+from logging_setup import get_logger
 
+# Create module logger
+logger = get_logger("stock_alerts")
 
 class StockAlerts(commands.Cog):
     """Discord cog for monitoring stock prices and sending alerts"""
@@ -15,49 +19,53 @@ class StockAlerts(commands.Cog):
         self.bot = bot
         self.alerts = {}  # {channel_id: [alert_configs]}
         self.test_tasks = {}  # {channel_id: task}
+        logger.info("Initializing StockAlerts cog")
         self.load_alerts()
         self.check_price_alerts.start()
+        logger.info("Started price alert checker")
 
     def cog_unload(self):
+        logger.info("Unloading StockAlerts cog")
         self.check_price_alerts.cancel()
         self.save_alerts()
         # Cancel any running test tasks
         for task in self.test_tasks.values():
             if not task.done():
+                logger.debug("Cancelling running test task")
                 task.cancel()
 
     def load_alerts(self):
         """Load saved alerts from file"""
+        logger.debug("Loading alerts from file")
         try:
-            # Create data directory if it doesn't exist
-            os.makedirs("data", exist_ok=True)
-
-            if os.path.exists("data/stock_alerts.json"):
-                with open("data/stock_alerts.json", "r") as f:
+            if os.path.exists("stock_alerts.json"):
+                with open("stock_alerts.json", "r") as f:
                     data = json.load(f)
                     # Convert string keys back to integers for channel IDs
                     self.alerts = {int(k): v for k, v in data.items()}
-                    print(
-                        f"Loaded {sum(len(alerts) for alerts in self.alerts.values())} price alerts"
-                    )
+                    alert_count = sum(len(alerts) for alerts in self.alerts.values())
+                    logger.info(f"Loaded {alert_count} price alerts")
+            else:
+                logger.info("No alerts file found, starting with empty alerts")
         except Exception as e:
-            print(f"Error loading stock alerts: {e}")
+            logger.error(f"Error loading stock alerts: {str(e)}")
             self.alerts = {}
 
     def save_alerts(self):
         """Save alerts to file"""
+        logger.debug("Saving alerts to file")
         try:
-            # Create data directory if it doesn't exist
-            os.makedirs("data", exist_ok=True)
-
-            with open("data/stock_alerts.json", "w") as f:
+            with open("stock_alerts.json", "w") as f:
                 json.dump(self.alerts, f)
+                alert_count = sum(len(alerts) for alerts in self.alerts.values())
+                logger.info(f"Saved {alert_count} price alerts")
         except Exception as e:
-            print(f"Error saving stock alerts: {e}")
+            logger.error(f"Error saving stock alerts: {str(e)}")
 
     @commands.group(name="alert", invoke_without_command=True)
     async def alert(self, ctx):
         """Command group for stock price alerts"""
+        logger.debug(f"Alert command invoked by {ctx.author}")
         await ctx.send(
             "Use `!alert add`, `!alert remove`, `!alert list`, or `!alert test` to manage stock alerts"
         )
@@ -70,15 +78,18 @@ class StockAlerts(commands.Cog):
         !alert add AAPL percent 5    - Alert when AAPL grows by 5%
         !alert add MSFT price 150    - Alert when MSFT reaches $150
         """
+        logger.info(f"{ctx.author} adding {alert_type} alert for {ticker} with value {value}")
         ticker = ticker.upper()
         channel_id = ctx.channel.id
 
         if alert_type not in ["percent", "price"]:
+            logger.warning(f"Invalid alert type: {alert_type}")
             await ctx.send("Alert type must be either 'percent' or 'price'")
             return
 
         # Get current price as reference
         try:
+            logger.debug(f"Getting current price for {ticker}")
             price_api = PricesAPI(
                 ticker=ticker,
                 interval="day",
@@ -90,10 +101,12 @@ class StockAlerts(commands.Cog):
             price_data = price_api.get_live_price()
 
             if not price_data or "price" not in price_data:
+                logger.warning(f"Could not get current price for {ticker}")
                 await ctx.send(f"Could not get current price for {ticker}")
                 return
 
             current_price = price_data["price"]
+            logger.debug(f"Current price for {ticker}: ${current_price}")
 
             # Create alert config
             alert_config = {
@@ -110,6 +123,7 @@ class StockAlerts(commands.Cog):
 
             self.alerts[channel_id].append(alert_config)
             self.save_alerts()
+            logger.info(f"Alert added for {ticker} in channel {channel_id}")
 
             # Show confirmation
             if alert_type == "percent":
@@ -124,6 +138,7 @@ class StockAlerts(commands.Cog):
                 )
 
         except Exception as e:
+            logger.error(f"Error adding alert for {ticker}: {str(e)}")
             await ctx.send(f"Error adding alert: {str(e)}")
 
     @alert.command(name="remove")
@@ -134,14 +149,17 @@ class StockAlerts(commands.Cog):
         !alert remove 2    - Removes alert at index 2
         !alert remove      - Lists alerts with indexes
         """
+        logger.debug(f"{ctx.author} attempting to remove alert {index}")
         channel_id = ctx.channel.id
 
         if channel_id not in self.alerts or not self.alerts[channel_id]:
+            logger.debug(f"No alerts found for channel {channel_id}")
             await ctx.send("No alerts set for this channel")
             return
 
         if index is None:
             # List alerts with indices for removal
+            logger.debug(f"Listing alerts with indices for channel {channel_id}")
             alert_list = self.alerts[channel_id]
             embed = discord.Embed(
                 title="Stock Price Alerts",
@@ -165,19 +183,24 @@ class StockAlerts(commands.Cog):
         if 0 <= index < len(self.alerts[channel_id]):
             removed = self.alerts[channel_id].pop(index)
             self.save_alerts()
+            logger.info(f"Removed alert #{index} for {removed['ticker']} in channel {channel_id}")
             await ctx.send(f"Removed alert for {removed['ticker']}")
         else:
+            logger.warning(f"Invalid alert index {index} for channel {channel_id}")
             await ctx.send(f"Invalid index. Use `!alert remove` to see valid indices")
 
     @alert.command(name="list")
     async def list_alerts(self, ctx):
         """List all stock price alerts for this channel"""
+        logger.debug(f"{ctx.author} listing alerts")
         channel_id = ctx.channel.id
 
         if channel_id not in self.alerts or not self.alerts[channel_id]:
+            logger.debug(f"No alerts found for channel {channel_id}")
             await ctx.send("No alerts set for this channel")
             return
 
+        logger.debug(f"Displaying {len(self.alerts[channel_id])} alerts for channel {channel_id}")
         embed = discord.Embed(
             title="Active Stock Price Alerts", color=discord.Color.blue()
         )
@@ -206,10 +229,12 @@ class StockAlerts(commands.Cog):
     @alert.command(name="test")
     async def test_alerts(self, ctx):
         """Start a test to verify alert functionality by sending messages every second"""
+        logger.info(f"{ctx.author} starting alert system test")
         channel_id = ctx.channel.id
 
         # Check if a test is already running in this channel
         if channel_id in self.test_tasks and not self.test_tasks[channel_id].done():
+            logger.warning(f"Test already running in channel {channel_id}")
             await ctx.send(
                 "❌ A test is already running in this channel. Use `!end test` to stop it."
             )
@@ -221,6 +246,7 @@ class StockAlerts(commands.Cog):
 
         # Start the test task
         self.test_tasks[channel_id] = asyncio.create_task(self._run_test(ctx))
+        logger.info(f"Test task started for channel {channel_id}")
 
     @commands.command(name="end")
     async def end_test(self, ctx, command_type: str):
@@ -228,17 +254,22 @@ class StockAlerts(commands.Cog):
         if command_type.lower() != "test":
             return
 
+        logger.info(f"{ctx.author} ending alert system test")
         channel_id = ctx.channel.id
 
         if channel_id in self.test_tasks and not self.test_tasks[channel_id].done():
             self.test_tasks[channel_id].cancel()
+            logger.info(f"Test task cancelled for channel {channel_id}")
             await ctx.send("✅ Alert system test stopped.")
         else:
+            logger.debug(f"No test running in channel {channel_id}")
             await ctx.send("❌ No test is currently running in this channel.")
 
     async def _run_test(self, ctx):
         """Run the alert test, sending a message every second"""
         counter = 1
+        channel_id = ctx.channel.id
+        logger.debug(f"Starting test message loop for channel {channel_id}")
         try:
             while True:
                 embed = discord.Embed(
@@ -249,17 +280,21 @@ class StockAlerts(commands.Cog):
                 embed.set_footer(text="Type !end test to stop this test")
 
                 await ctx.send(embed=embed)
+                logger.debug(f"Sent test message #{counter} to channel {channel_id}")
                 counter += 1
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
             # Task was cancelled by end_test command
+            logger.debug(f"Test task was cancelled for channel {channel_id}")
             pass
         except Exception as e:
+            logger.error(f"Error in test task for channel {channel_id}: {str(e)}")
             await ctx.send(f"❌ Test stopped due to error: {str(e)}")
 
     @commands.command(name="watchlist")
     async def show_watchlist(self, ctx):
         """Show configured stocks to monitor from config.py"""
+        logger.debug(f"{ctx.author} viewing watchlist")
         from config import STOCKS
 
         embed = discord.Embed(
@@ -273,19 +308,25 @@ class StockAlerts(commands.Cog):
             high = thresholds["high"]
             description = f"Low: ${low:.2f}\nHigh: ${high:.2f}"
             embed.add_field(name=ticker, value=description, inline=True)
+            logger.debug(f"Added {ticker} to watchlist display")
 
         await ctx.send(embed=embed)
+        logger.debug("Watchlist displayed")
 
     @tasks.loop(seconds=CHECK_INTERVAL)
     async def check_price_alerts(self):
         """Check current prices against alerts periodically based on config"""
+        logger.debug("Running periodic price alert check")
         if not self.alerts:
+            logger.debug("No alerts to check")
             return
 
         for channel_id, alert_list in list(self.alerts.items()):
+            logger.debug(f"Checking alerts for channel {channel_id}")
             channel = self.bot.get_channel(channel_id)
             if not channel:
                 # Channel was deleted or bot no longer has access
+                logger.warning(f"Channel {channel_id} not found, removing its alerts")
                 del self.alerts[channel_id]
                 continue
 
@@ -296,6 +337,7 @@ class StockAlerts(commands.Cog):
                 alert_type = alert["type"]
                 value = alert["value"]
                 ref_price = alert["reference_price"]
+                logger.debug(f"Checking alert #{i} for {ticker}")
 
                 try:
                     # Get current price
@@ -310,15 +352,19 @@ class StockAlerts(commands.Cog):
                     price_data = price_api.get_live_price()
 
                     if not price_data or "price" not in price_data:
+                        logger.warning(f"Could not get current price for {ticker}")
                         continue
 
                     current_price = price_data["price"]
+                    logger.debug(f"Current price for {ticker}: ${current_price}")
 
                     # Check if alert conditions are met
                     if alert_type == "percent":
                         percent_change = ((current_price - ref_price) / ref_price) * 100
+                        logger.debug(f"{ticker} percent change: {percent_change:.2f}% (target: {value}%)")
                         if percent_change >= value:
                             # Alert triggered
+                            logger.info(f"Percent alert triggered for {ticker}: {percent_change:.2f}% (target: {value}%)")
                             embed = discord.Embed(
                                 title=f"🚀 {ticker} Price Alert Triggered!",
                                 description=f"{ticker} has grown by {percent_change:.2f}% (target: {value}%)",
@@ -344,13 +390,14 @@ class StockAlerts(commands.Cog):
                             triggered_indices.append(i)
 
                     else:  # price alert
-                        if (value > ref_price and current_price >= value) or (
+                        target_condition = (value > ref_price and current_price >= value) or (
                             value < ref_price and current_price <= value
-                        ):
+                        )
+                        logger.debug(f"{ticker} current price: ${current_price} (target: ${value})")
+                        if target_condition:
                             # Alert triggered
-                            direction = (
-                                "increased to" if value > ref_price else "decreased to"
-                            )
+                            direction = "increased to" if value > ref_price else "decreased to"
+                            logger.info(f"Price alert triggered for {ticker}: {direction} ${current_price:.2f} (target: ${value:.2f})")
                             embed = discord.Embed(
                                 title=f"⚠️ {ticker} Price Alert Triggered!",
                                 description=f"{ticker} has {direction} ${current_price:.2f} (target: ${value:.2f})",
@@ -371,14 +418,19 @@ class StockAlerts(commands.Cog):
                             triggered_indices.append(i)
 
                 except Exception as e:
-                    print(f"Error checking alert for {ticker}: {e}")
+                    logger.error(f"Error checking alert for {ticker}: {str(e)}")
 
             # Remove triggered alerts (in reverse order to maintain indices)
-            for index in sorted(triggered_indices, reverse=True):
-                alert_list.pop(index)
+            if triggered_indices:
+                logger.info(f"Removing {len(triggered_indices)} triggered alerts from channel {channel_id}")
+                for index in sorted(triggered_indices, reverse=True):
+                    ticker = alert_list[index]["ticker"]
+                    logger.debug(f"Removing triggered alert #{index} for {ticker}")
+                    alert_list.pop(index)
 
             # If no alerts left for this channel, remove entry
             if not alert_list:
+                logger.debug(f"No alerts left for channel {channel_id}, removing entry")
                 del self.alerts[channel_id]
 
         # Save changes
@@ -387,15 +439,17 @@ class StockAlerts(commands.Cog):
 
     async def check_config_stocks(self):
         """Check configured stocks from config.py against thresholds"""
+        logger.debug("Checking configured stocks from config")
         from config import STOCKS
 
         # Get default alert channel from config
         channel = self.bot.get_channel(ALERT_CHANNEL_ID)
         if not channel:
-            print(f"Warning: Alert channel {ALERT_CHANNEL_ID} not found")
+            logger.warning(f"Alert channel {ALERT_CHANNEL_ID} not found")
             return
 
         for ticker, thresholds in STOCKS.items():
+            logger.debug(f"Checking config stock {ticker}")
             try:
                 # Get current price
                 price_api = PricesAPI(
@@ -409,14 +463,17 @@ class StockAlerts(commands.Cog):
                 price_data = price_api.get_live_price()
 
                 if not price_data or "price" not in price_data:
+                    logger.warning(f"Could not get current price for config stock {ticker}")
                     continue
 
                 current_price = price_data["price"]
                 low_threshold = thresholds["low"]
                 high_threshold = thresholds["high"]
+                logger.debug(f"{ticker} price: ${current_price}, thresholds: ${low_threshold}-${high_threshold}")
 
                 # Check if price is outside thresholds
                 if current_price <= low_threshold:
+                    logger.info(f"{ticker} below threshold alert: ${current_price} <= ${low_threshold}")
                     embed = discord.Embed(
                         title=f"📉 {ticker} Below Threshold Alert",
                         description=f"{ticker} has fallen below the configured threshold",
@@ -431,6 +488,7 @@ class StockAlerts(commands.Cog):
                     await channel.send(embed=embed)
 
                 elif current_price >= high_threshold:
+                    logger.info(f"{ticker} above threshold alert: ${current_price} >= ${high_threshold}")
                     embed = discord.Embed(
                         title=f"📈 {ticker} Above Threshold Alert",
                         description=f"{ticker} has risen above the configured threshold",
@@ -445,16 +503,20 @@ class StockAlerts(commands.Cog):
                     await channel.send(embed=embed)
 
             except Exception as e:
-                print(f"Error checking config stock {ticker}: {e}")
+                logger.error(f"Error checking config stock {ticker}: {str(e)}")
 
     @check_price_alerts.before_loop
     async def before_check_price_alerts(self):
         """Wait until the bot is ready before starting the alert loop"""
+        logger.debug("Waiting for bot to be ready before starting alert loop")
         await self.bot.wait_until_ready()
+        logger.debug("Bot is ready, checking config stocks")
         # Also check config stocks whenever the task runs
         self.bot.loop.create_task(self.check_config_stocks())
 
 
 async def setup(bot):
     """Add the StockAlerts cog to the bot"""
+    logger.info("Setting up StockAlerts cog")
     await bot.add_cog(StockAlerts(bot))
+    logger.info("StockAlerts cog setup complete")

@@ -1100,22 +1100,22 @@ if __name__ == '__main__':
     
     kucoin_api = KucoinAPI(key, secret, passphrase)
     
-    balance = kucoin_api.get_cross_margin_accounts(quote_currency="USDT")
+    balance = kucoin_api.get_isolated_margin_accounts(symbol="BTC-USDT",quote_currency="USDT")
     
-    print(balance["data"]["accounts"][0])
-    n_liab = balance["data"]["accounts"][0]["liability"]
-    n_dispo = balance["data"]["accounts"][0]["available"]
+    print(balance["data"]["assets"])
+  
 
     #buy = kucoin_api.add_margin_order_v1("BTC-USDT", side = "buy", order_type="market", funds = 1, margin_model="cross", auto_borrow=True,)
     #print(buy)
-    #sell = kucoin_api.add_margin_order_v1("BTC-USDT", side = "sell", order_type="limit", , margin_model="cross", auto_borrow=True,)
+
+    #sell = kucoin_api.add_margin_order("BTC-USDT", side = "sell",order_type="market", is_isolated=True, auto_borrow=True, size=0.00001)
     #print(sell)
 
-    stop = kucoin_api.add_stop_order("BTC-USDT", side = "buy", order_type="market", stop_price="79555",funds="1", trade_type="MARGIN_ISOLATED_TRADE", remark="bot test stop order buy")
-    print(stop)
+    #stop = kucoin_api.add_stop_order("BTC-USDT", side = "buy", order_type="market", stop_price="79555",funds="1", trade_type="MARGIN_ISOLATED_TRADE", remark="bot test stop order buy")
+    #print(stop)
 
 
     #n_borrow = kucoin_api.get_borrow_history(currency="BTC")["data"]["items"][0]["size"]
     #currency =kucoin_api.get_borrow_history(currency="BTC")["data"]["items"][0]["currency"]
-    
-    #print(kucoin_api.repay_margin_loan(currency=currency, size=n_borrow))
+    #print(n_borrow)
+    #print(kucoin_api.repay_margin_loan(currency=currency, size=n_borrow, symbol="BTC-USDT", is_isolated=True))

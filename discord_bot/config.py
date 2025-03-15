@@ -13,9 +13,7 @@ CHECK_INTERVAL = 180  # 1 hour
 # Add to config.py
 # Portfolio positions: symbol -> {shares, entry_price}
 PORTFOLIO = {
-    "AAPL": {"shares": 2, "entry_price": 244.765},
-    "NVDA": {"shares": 4, "entry_price": 126.50},
-    "RXRX": {"shares": 19, "entry_price": 8.205},
+    "NVDA": {"shares": 2, "entry_price": 120.1},
 }
 
 # Portfolio update interval in seconds
