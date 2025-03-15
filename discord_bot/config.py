@@ -3,8 +3,6 @@ ALERT_CHANNEL_ID = 1344038761868165211
 
 # Stocks to monitor: symbol -> {threshold_low, threshold_high}
 STOCKS = {
-    "AAPL": {"low": 242.0, "high": 245.0},
-    "NVDA": {"low": 130.0, "high": 135.0},
 }
 
 # Check interval in seconds

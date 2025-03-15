@@ -9,6 +9,7 @@ from stock_alerts import setup as setup_stock_alerts
 from portfolio_tracker import setup as setup_portfolio_tracker
 from scheduled_reports import ScheduledReports
 from trading_commands import setup as setup_trading_commands
+from price_tracker import setup as setup_price_tracker 
 
 # Create module logger
 logger = get_logger("bot")
@@ -38,11 +39,11 @@ async def on_ready():
     except Exception as e:
         logger.error(f"Error loading stock commands: {e}")
 
-    try:
-        await setup_stock_alerts(bot)
-        logger.info("Stock alerts loaded!")
-    except Exception as e:
-        logger.error(f"Error loading stock alerts: {e}")
+    #try:
+    #    await setup_stock_alerts(bot)
+    #    logger.info("Stock alerts loaded!")
+    #except Exception as e:
+    #    logger.error(f"Error loading stock alerts: {e}")
 
     # Load portfolio tracker first
     try:
@@ -70,6 +71,13 @@ async def on_ready():
         logger.info("Trading commands loaded!")
     except Exception as e:
         logger.error(f"Error loading trading commands: {e}")
+
+    try:
+        await setup_price_tracker(bot)
+        logger.info("Price traker loaded!")
+    except Exception as e:
+        logger.error(f"Error loading trading commands: {e}")
+
 
 
 @bot.command(name="ping")

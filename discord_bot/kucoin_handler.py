@@ -7,9 +7,10 @@ import time
 import uuid
 from typing import Dict, Any
 from urllib.parse import urlencode
-
 import requests
+from logging_setup import get_logger
 
+logger = get_logger("stock_commands")
 
 class KucoinClient:
     """Base client for KuCoin API authentication and signing."""
@@ -25,7 +26,8 @@ class KucoinClient:
         """
         self.api_key = api_key or ""
         self.api_secret = api_secret or ""
-        
+        logger.info("Initializing KucoinClient")
+
         # Sign the passphrase if credentials are provided
         if api_passphrase and api_secret:
             self.api_passphrase = self.sign(api_passphrase.encode('utf-8'), api_secret.encode('utf-8'))
@@ -94,6 +96,7 @@ class KucoinAPI:
         self.api_secret = api_secret
         self.host = "api.kucoin.com"
         self.base_url = f"https://{self.host}"
+        logger.info("Initializing KucoinAPI")
 
     def _make_request(self, 
                      method: str, 
@@ -798,7 +801,28 @@ class KucoinAPI:
             data=data
         )
 
-
+    def cancel_stop_order(self, order_id: str) -> Dict[str, Any]:
+        """
+        Cancel a single stop order by its order ID.
+        
+        Args:
+            order_id: The unique order ID of the stop order to be cancelled
+                
+        Returns:
+            Dictionary containing a list of cancelled order IDs
+            
+        Note:
+            The order ID is the server-assigned order id and not the passed clientOid.
+            You'll receive cancelledOrderIds field once the system has received the 
+            cancellation request. The cancellation request will be processed by the 
+            matching engine in sequence.
+        """
+        return self._make_request(
+            method="DELETE",
+            endpoint=f"/api/v1/stop-order/{order_id}"
+        )
+    
+    
     ###################
     #       DEBT      #
     ###################
@@ -1088,7 +1112,53 @@ class KucoinAPI:
     #   POSITIONS      #
     ####################
     
-    # To get open positions
+    def cancel_margin_order(self, order_id: str, symbol: str = "BTC-USDT") -> Dict[str, Any]:
+        """
+        **DOESN'T WORK!!!!!!**  Cancel a margin order by its order ID.
+        
+        Args:
+            order_id: The unique order ID to cancel
+            symbol: Trading pair symbol (e.g., BTC-USDT)
+            
+        Returns:
+            Dictionary containing cancellation response
+        """
+        return self._make_request(
+            method="DELETE",
+            endpoint=f"/api/v3/hf/margin/orders/{order_id}",
+            params={"symbol": symbol}
+        )
+    
+    def get_margin_open_orders(self, symbol: str = "BTC-USDT", trade_type: str = "MARGIN_ISOLATED_TRADE") -> Dict[str, Any]:
+        """
+        Get all active margin orders for a symbol.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., BTC-USDT)
+            trade_type: Type of margin trading
+                    "MARGIN_TRADE" - cross margin trading order
+                    "MARGIN_ISOLATED_TRADE" - isolated margin trading order
+            
+        Returns:
+            List of active margin orders sorted by latest update time
+        """
+        # Validate trade_type parameter
+        valid_trade_types = ["MARGIN_TRADE", "MARGIN_ISOLATED_TRADE"]
+        if trade_type not in valid_trade_types:
+            raise ValueError(f"trade_type must be one of {valid_trade_types}")
+            
+        # Prepare query parameters
+        params = {
+            "symbol": symbol,
+            "tradeType": trade_type
+        }
+        
+        # Make the API request
+        return self._make_request(
+            method="GET",
+            endpoint="/api/v3/hf/margin/orders/active",
+            params=params
+        )
 
 if __name__ == '__main__':
     
@@ -1102,19 +1172,28 @@ if __name__ == '__main__':
     
     balance = kucoin_api.get_isolated_margin_accounts(symbol="BTC-USDT",quote_currency="USDT")
     
+    print("Balance is:")
     print(balance["data"]["assets"])
-  
-
-    #buy = kucoin_api.add_margin_order_v1("BTC-USDT", side = "buy", order_type="market", funds = 1, margin_model="cross", auto_borrow=True,)
-    #print(buy)
-
+    print("\n Limit BUY")
+    buy = kucoin_api.add_margin_order_v1("BTC-USDT", side = "buy", order_type="limit", size=0.00004, price=10000, margin_model="isolated")
+    print(buy)
+    print("\n Cancel order:")
     #sell = kucoin_api.add_margin_order("BTC-USDT", side = "sell",order_type="market", is_isolated=True, auto_borrow=True, size=0.00001)
     #print(sell)
 
+    #buy = kucoin_api.add_margin_order("BTC-USDT", side = "buy", order_type="limit", size=0.00004, price =10000, is_isolated=True, remark ="Bot")
+    #print(buy)
+    
     #stop = kucoin_api.add_stop_order("BTC-USDT", side = "buy", order_type="market", stop_price="79555",funds="1", trade_type="MARGIN_ISOLATED_TRADE", remark="bot test stop order buy")
     #print(stop)
 
+    #open=kucoin_api.get_margin_open_orders()
+    #print(open)
+    id=buy["data"]["orderId"]
+    cancel = kucoin_api.cancel_order_by_id(order_id=id)
+    print(cancel)
 
+    
     #n_borrow = kucoin_api.get_borrow_history(currency="BTC")["data"]["items"][0]["size"]
     #currency =kucoin_api.get_borrow_history(currency="BTC")["data"]["items"][0]["currency"]
     #print(n_borrow)
