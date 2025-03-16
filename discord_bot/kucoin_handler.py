@@ -1108,6 +1108,81 @@ class KucoinAPI:
             params=params
         )
 
+    def get_recent_orders(self) -> Dict[str, Any]:
+        """
+        Get recent orders from the last 24 hours (up to 1000 orders).
+        
+        Returns:
+            Dictionary containing recent orders data, paginated and sorted in descending 
+            order by time.
+            
+        Note:
+            This endpoint requires the General permission.
+            The response includes detailed information about each order including:
+            ID, symbol, type, side, price, size, fees, and various order parameters.
+        """
+        return self._make_request(
+            method="GET",
+            endpoint="/api/v1/limit/orders",
+            auth_required=True
+        )
+    
+    def get_order_list(self, 
+                  status: str = "done", 
+                  symbol: str = "BTC-USDT", 
+                  side: str = None, 
+                  order_type: str = None,
+                  trade_type: str = "MARGIN_ISOLATED_TRADE", 
+                  start_at: int = None, 
+                  end_at: int = None) -> Dict[str, Any]:
+        """
+        Get a list of orders with pagination, sorted in descending order by time.
+        
+        Args:
+            status: Order status - 'active' or 'done' (default: 'done')
+            symbol: Only list orders for a specific symbol (e.g., 'BTC-USDT')
+            side: Filter by side - 'buy' or 'sell'
+            order_type: Filter by order type - 'limit', 'market', 'limit_stop' or 'market_stop'
+            trade_type: The type of trading - 'TRADE' (Spot Trading, default),
+                        'MARGIN_TRADE' (Cross Margin Trading),
+                        'MARGIN_ISOLATED_TRADE' (Isolated Margin Trading)
+            start_at: Start time in milliseconds
+            end_at: End time in milliseconds
+            
+        Returns:
+            Dictionary containing paginated order data including totalNum, 
+            currentPage, pageSize, totalPage, and items (order array)
+            
+        Notes:
+            - When querying orders in 'done' status, the time range cannot exceed 7 days
+            - History for cancelled orders is kept for 1 month, filled orders for 6 months
+            - For high-volume trading, maintain your own list of open orders
+        """
+        # Prepare query parameters
+        params = {}
+        
+        # Add parameters only if they are provided and not None
+        if status:
+            params["status"] = status
+        if symbol:
+            params["symbol"] = symbol
+        if side:
+            params["side"] = side
+        if order_type:
+            params["type"] = order_type
+        if trade_type:
+            params["tradeType"] = trade_type
+        if start_at:
+            params["startAt"] = start_at
+        if end_at:
+            params["endAt"] = end_at
+        
+        return self._make_request(
+            method="GET",
+            endpoint="/api/v1/orders",
+            params=params
+        )
+    
     ####################
     #   POSITIONS      #
     ####################
@@ -1131,7 +1206,7 @@ class KucoinAPI:
     
     def get_margin_open_orders(self, symbol: str = "BTC-USDT", trade_type: str = "MARGIN_ISOLATED_TRADE") -> Dict[str, Any]:
         """
-        Get all active margin orders for a symbol.
+        **DOESN'T WORK**Get all active margin orders for a symbol.
         
         Args:
             symbol: Trading pair symbol (e.g., BTC-USDT)
@@ -1160,6 +1235,9 @@ class KucoinAPI:
             params=params
         )
 
+    
+
+
 if __name__ == '__main__':
     
     import os
@@ -1187,11 +1265,12 @@ if __name__ == '__main__':
     #stop = kucoin_api.add_stop_order("BTC-USDT", side = "buy", order_type="market", stop_price="79555",funds="1", trade_type="MARGIN_ISOLATED_TRADE", remark="bot test stop order buy")
     #print(stop)
 
-    #open=kucoin_api.get_margin_open_orders()
-    #print(open)
-    id=buy["data"]["orderId"]
-    cancel = kucoin_api.cancel_order_by_id(order_id=id)
-    print(cancel)
+    open=kucoin_api.get_recent_orders()
+    print(open)
+
+    #id=buy["data"]["orderId"]
+    #cancel = kucoin_api.cancel_order_by_id(order_id=id)
+    #print(cancel)
 
     
     #n_borrow = kucoin_api.get_borrow_history(currency="BTC")["data"]["items"][0]["size"]
