@@ -1,11 +1,25 @@
 import discord
 from discord.ext import commands
-import asyncio
 from datetime import datetime
 import os
 from kucoin_handler import KucoinAPI
-import pyperclip
 import uuid
+
+# Import utility functions
+from utils.embed_utilities import (
+    create_price_embed,
+    create_order_embed,
+    create_alert_embed,
+)
+
+from utils.validation_utilities import (
+    validate_symbol,
+    validate_side,
+    validate_order_type,
+    validate_positive_number,
+    get_user_input,
+    confirm_action
+)
 
 
 class TradingCommands(commands.Cog):
@@ -34,80 +48,48 @@ class TradingCommands(commands.Cog):
         """
         trade_data = {}
 
-        # Helper function for collecting user input
-        async def get_user_input(prompt, timeout=60, validator=None):
-            prompt_msg = await ctx.send(prompt)
-
-            def check(message):
-                return message.author == ctx.author and message.channel == ctx.channel
-
-            try:
-                user_response = await self.bot.wait_for(
-                    "message", timeout=timeout, check=check
-                )
-                if validator:
-                    result, error_msg = validator(user_response.content)
-                    if not result:
-                        await ctx.send(f"❌ {error_msg} Please try again.")
-                        return await get_user_input(prompt, timeout, validator)
-                return user_response.content
-            except asyncio.TimeoutError:
-                await ctx.send("⏱️ No input received. Trade cancelled.")
-                return None
-
         # 1. Ask for market/trading pair
-        def validate_market(value):
-            try:
-                value = value.upper()
-                if "-" in value and len(value.split("-")) == 2:
-                    return True, ""
-                return False, f"Market {value} doesn't seem to be in the correct format (e.g., BTC-USDT)."
-            except Exception as e:
-                return False, f"Error validating market: {str(e)}"
-
         market = await get_user_input(
-            "📊 Enter the trading pair (e.g., BTC-USDT):", validator=validate_market
+            ctx,
+            "📊 Enter the trading pair (e.g., BTC-USDT):",
+            validator=validate_symbol,
+            timeout=60
         )
         if not market:
             return None
         trade_data["market"] = market.upper()
 
         # 2. Ask for order type (market or limit)
-        def validate_order_type(value):
-            if value.lower() in ["market", "limit"]:
-                return True, ""
-            return False, "Invalid order type. Please enter 'market' or 'limit'."
-
         order_type = await get_user_input(
-            "📝 Order type (market or limit)?", validator=validate_order_type
+            ctx,
+            "📝 Order type (market or limit)?",
+            validator=validate_order_type,
+            timeout=60
         )
         if not order_type:
             return None
         trade_data["order_type"] = order_type.lower()
 
         # 3. Ask for side (buy/sell)
-        def validate_side(value):
-            if value.lower() in ["buy", "sell"]:
-                return True, ""
-            return False, "Invalid side. Please enter 'buy' or 'sell'."
-
-        side = await get_user_input("📈 Buy or sell?", validator=validate_side)
+        side = await get_user_input(
+            ctx,
+            "📈 Buy or sell?",
+            validator=validate_side,
+            timeout=60
+        )
         if not side:
             return None
         trade_data["side"] = side.lower()
 
         # 4. Ask for amount
         def validate_amount(value):
-            try:
-                amount = float(value)
-                if amount <= 0:
-                    return False, "Amount must be positive."
-                return True, ""
-            except:
-                return False, "Invalid amount. Please enter a valid number."
+            return validate_positive_number(value, min_value=0)
 
         amount = await get_user_input(
-            "💰 Enter the amount to trade:", validator=validate_amount
+            ctx,
+            "💰 Enter the amount to trade:",
+            validator=validate_amount,
+            timeout=60
         )
         if not amount:
             return None
@@ -116,16 +98,13 @@ class TradingCommands(commands.Cog):
         # 5. For limit orders, we need price
         if trade_data["order_type"] == "limit":
             def validate_price(value):
-                try:
-                    price = float(value)
-                    if price <= 0:
-                        return False, "Price must be positive."
-                    return True, ""
-                except:
-                    return False, "Invalid price. Please enter a valid number."
+                return validate_positive_number(value, min_value=0)
 
             price = await get_user_input(
-                "💲 Enter the price for your limit order:", validator=validate_price
+                ctx,
+                "💲 Enter the price for your limit order:",
+                validator=validate_price,
+                timeout=60
             )
             if not price:
                 return None
@@ -209,41 +188,38 @@ class TradingCommands(commands.Cog):
             
             # Check if the order was successful
             if response.get("code") == "200000":
-                # Create a success embed
-                color = discord.Color.green() if side == "buy" else discord.Color.red()
-                embed = discord.Embed(
+                # Use the utility function to create a success embed
+                order_data = {
+                    "market": market,
+                    "side": side,
+                    "type": order_type,
+                    "price": price if order_type == "limit" else None,
+                }
+                
+                # Add amount or funds based on order type
+                if order_type == "market" and use_funds and side == "buy":
+                    order_data["funds"] = amount
+                else:
+                    order_data["size"] = amount
+                
+                # Add response data
+                if "data" in response:
+                    order_data.update(response["data"])
+                
+                # Create the embed
+                embed = create_order_embed(
+                    order_data=order_data,
                     title=f"✅ {side.upper()} Order Placed",
-                    description=f"Your {order_type} order has been placed successfully",
-                    color=color
+                    is_success=True,
+                    order_type=order_type,
+                    side=side,
+                    include_id=True
                 )
                 
-                # Add order details
-                embed.add_field(name="Market", value=market, inline=True)
-                embed.add_field(name="Type", value=order_type.capitalize(), inline=True)
-                embed.add_field(name="Side", value=side.upper(), inline=True)
-                
-                if order_type == "market" and use_funds and side == "buy":
-                    embed.add_field(name="Funds", value=f"${amount}", inline=True)
-                else:
-                    embed.add_field(name="Amount", value=str(amount), inline=True)
-                
-                if order_type == "limit" and price:
-                    embed.add_field(name="Price", value=f"${price}", inline=True)
-                
-                # Add response data and order ID for copying
-                order_id = None
-                if "data" in response:
-                    data = response["data"]
-                    if "orderId" in data:
-                        order_id = data["orderId"]
-                        embed.add_field(name="Order ID", value=f"`{order_id}`", inline=False)
-                        embed.set_footer(text="Click 📋 below to copy the Order ID")
-                    
-                    # Add borrow details if included in response
-                    if "borrowSize" in data:
-                        embed.add_field(name="Borrowed", value=data["borrowSize"], inline=True)
-                    if "loanApplyId" in data:
-                        embed.add_field(name="Loan ID", value=data["loanApplyId"], inline=True)
+                # Add footer for copying
+                order_id = response.get("data", {}).get("orderId")
+                if order_id:
+                    embed.set_footer(text="Click 📋 below to copy the Order ID")
                 
                 # Send the message with the embed
                 message = await ctx.send(embed=embed)
@@ -329,26 +305,30 @@ class TradingCommands(commands.Cog):
         client_oid = str(uuid.uuid4())
         test_order_id = f"test-{int(datetime.now().timestamp())}"
         
-        # Create a success embed
-        color = discord.Color.green() if side.lower() == "buy" else discord.Color.red()
-        embed = discord.Embed(
-            title=f"🧪 TEST {side.upper()} Order Simulation",
-            description=f"Your test {order_type} order would be processed as follows",
-            color=color
-        )
-        
-        # Add order details
-        embed.add_field(name="Market", value=market.upper(), inline=True)
-        embed.add_field(name="Type", value=order_type.capitalize(), inline=True)
-        embed.add_field(name="Side", value=side.upper(), inline=True)
-        embed.add_field(name="Amount", value=str(amount), inline=True)
+        # Create order data for the embed
+        order_data = {
+            "market": market.upper(),
+            "side": side,
+            "type": order_type,
+            "orderId": test_order_id,
+            "size": str(amount),
+        }
         
         if order_type == "limit" and price:
-            embed.add_field(name="Price", value=f"${price}", inline=True)
-            embed.add_field(name="Total Value", value=f"${amount * price:.2f}", inline=True)
+            order_data["price"] = price
+            total_value = amount * price
+            order_data["total"] = total_value
         
-        # Add test order ID
-        embed.add_field(name="Test Order ID", value=f"`{test_order_id}`", inline=False)
+        # Create the embed using utility function
+        embed = create_order_embed(
+            order_data=order_data,
+            title=f"🧪 TEST {side.upper()} Order Simulation",
+            is_success=True,
+            order_type=order_type,
+            side=side
+        )
+        
+        # Add test footer
         embed.set_footer(text="This is a test - no actual order was placed")
         
         # Send the message with the embed
@@ -439,67 +419,47 @@ class TradingCommands(commands.Cog):
             except:
                 pass
 
-        # Show warning and get confirmation before proceeding
-        warning = discord.Embed(
-            title="⚠️ WARNING: REAL ORDER REQUEST ⚠️",
-            description="You are about to place an order using REAL funds. Are you sure you want to proceed?",
-            color=discord.Color.red()
-        )
-        
-        # Add order details to the warning
-        warning.add_field(name="Market", value=market.upper(), inline=True)
-        warning.add_field(name="Side", value=side.upper(), inline=True)
-        warning.add_field(name="Order Type", value=order_type.capitalize(), inline=True)
+        # Create fields for confirmation embed
+        fields = [
+            ("Market", market.upper(), True),
+            ("Side", side.upper(), True),
+            ("Order Type", order_type.capitalize(), True),
+        ]
         
         if order_type == "market" and use_funds and side == "buy":
-            warning.add_field(name="Funds to Use", value=f"${amount} USDT", inline=True)
+            fields.append(("Funds to Use", f"${amount} USDT", True))
         else:
             # Specify what the amount refers to (BTC, ETH, etc.)
             base_currency = market.split("-")[0]  # Extract base currency from market pair
-            warning.add_field(name="Amount", value=f"{amount} {base_currency}", inline=True)
+            fields.append(("Amount", f"{amount} {base_currency}", True))
         
         if order_type == "limit" and price is not None:
-            warning.add_field(name="Price", value=f"${price:.2f}", inline=True)
+            fields.append(("Price", f"${price:.2f}", True))
         elif price is not None:
-            warning.add_field(name="Current Market Price", value=f"${price:.2f} (approximate)", inline=True)
+            fields.append(("Current Market Price", f"${price:.2f} (approximate)", True))
         
-        # Add instruction to use emoji reactions instead of text reply
-        warning.set_footer(text="React with ✅ to confirm or ❌ to cancel")
+        # Use confirm_action utility for validation
+        confirmed = await confirm_action(
+            ctx,
+            title="⚠️ WARNING: REAL ORDER REQUEST ⚠️",
+            description="You are about to place an order using REAL funds. Are you sure you want to proceed?",
+            color=discord.Color.red(),
+            use_reactions=True
+        )
         
-        # Send the warning message and add reaction buttons
-        message = await ctx.send(embed=warning)
-        await message.add_reaction("✅")
-        await message.add_reaction("❌")
-        
-        # Wait for user to click a reaction
-        def check(reaction, user):
-            return (
-                user == ctx.author
-                and reaction.message.id == message.id
-                and str(reaction.emoji) in ["✅", "❌"]
+        if confirmed:
+            # Process the real trade
+            await self._process_real_trade(
+                ctx,
+                market,
+                side,
+                amount,
+                price,
+                order_type,
+                use_funds
             )
-        
-        try:
-            reaction, user = await self.bot.wait_for("reaction_add", timeout=10.0, check=check)
-            
-            if str(reaction.emoji) == "✅":
-                # Process the real trade
-                await self._process_real_trade(
-                    ctx,
-                    market,
-                    side,
-                    amount,
-                    price,
-                    order_type,
-                    use_funds
-                )
-            else:
-                await ctx.send("🛑 Order creation cancelled.")
-                return
-                
-        except asyncio.TimeoutError:
-            await ctx.send("⏱️ No response received. Order creation cancelled.")
-            return
+        else:
+            await ctx.send("🛑 Order creation cancelled.")
 
     @commands.command(name="ticker")
     async def get_ticker(self, ctx, symbol: str = "BTC-USDT"):
@@ -514,41 +474,23 @@ class TradingCommands(commands.Cog):
             # Extract the data part of the response
             ticker = ticker_data.get("data", {})
             
-            embed = discord.Embed(
-                title=f"{symbol} Ticker",
-                description="Current market data from KuCoin",
-                color=discord.Color.blue(),
+            # Format timestamp if available
+            if "time" in ticker:
+                try:
+                    timestamp = int(ticker["time"]) / 1000  # Convert ms to seconds
+                    formatted_time = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+                    ticker["formattedTime"] = formatted_time
+                except:
+                    pass
+            
+            # Use the utility to create the price embed
+            embed = create_price_embed(
+                symbol=symbol,
+                price_data=ticker,
+                title_prefix="Market Data",
+                show_additional_fields=True,
+                footer_text=f"Data from KuCoin | Time: {ticker.get('formattedTime', 'N/A')}"
             )
-            
-            # Add relevant ticker fields
-            fields = [
-                ("Sequence", "sequence"),
-                ("Price", "price"),
-                ("Size", "size"),
-                ("Best Bid", "bestBid"),
-                ("Best Bid Size", "bestBidSize"),
-                ("Best Ask", "bestAsk"),
-                ("Best Ask Size", "bestAskSize"),
-                ("Time", "time")
-            ]
-            
-            for label, key in fields:
-                if key in ticker:
-                    value = ticker[key]
-                    # Format prices and sizes to look nicer
-                    if key in ["price", "bestBid", "bestAsk"]:
-                        try:
-                            value = f"${float(value):.2f}"
-                        except:
-                            pass
-                    # Format time if available
-                    if key == "time":
-                        try:
-                            timestamp = int(value) / 1000  # Convert ms to seconds
-                            value = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
-                        except:
-                            pass
-                    embed.add_field(name=label, value=value, inline=True)
             
             await ctx.send(embed=embed)
             
@@ -572,14 +514,10 @@ class TradingCommands(commands.Cog):
                 await ctx.send(f"No fee data found for {symbol}")
                 return
             
-            embed = discord.Embed(
-                title=f"Trading Fees",
-                description=f"Fee information for requested symbols",
-                color=discord.Color.blue(),
-            )
-            
+            # Create fields for the embed
+            fields = []
             for fee_info in fees:
-                symbol = fee_info.get("symbol", "Unknown")
+                symbol_name = fee_info.get("symbol", "Unknown")
                 
                 fee_details = ""
                 if "takerFeeRate" in fee_info:
@@ -587,7 +525,15 @@ class TradingCommands(commands.Cog):
                 if "makerFeeRate" in fee_info:
                     fee_details += f"Maker Fee: {float(fee_info['makerFeeRate'])*100:.4f}%\n"
                 
-                embed.add_field(name=symbol, value=fee_details or "No fee data", inline=False)
+                fields.append((symbol_name, fee_details or "No fee data", False))
+            
+            # Create the embed using utility
+            embed = create_alert_embed(
+                title="Trading Fees",
+                description="Fee information for requested symbols",
+                fields=fields,
+                color=discord.Color.blue()
+            )
             
             await ctx.send(embed=embed)
             
@@ -638,22 +584,14 @@ class TradingCommands(commands.Cog):
                     await processing_message.edit(content=f"No isolated margin account data found for {symbol}.")
                     return
                 
-                # Create embed with account information
-                embed = discord.Embed(
-                    title=f"🏦 {symbol} Isolated Margin Account",
-                    description="Your KuCoin isolated margin account information",
-                    color=discord.Color.blue()
-                )
+                # Create fields for the embed
+                fields = []
                 
                 # Add account status and debt ratio
                 if "status" in asset_info:
                     status_value = asset_info["status"]
                     status_text = "Active" if status_value == "ACTIVATED" else status_value
-                    embed.add_field(
-                        name="Status",
-                        value=status_text,
-                        inline=True
-                    )
+                    fields.append(("Status", status_text, True))
                 
                 if "debtRatio" in asset_info:
                     debt_ratio = float(asset_info["debtRatio"]) * 100
@@ -666,11 +604,7 @@ class TradingCommands(commands.Cog):
                     elif debt_ratio > 30:
                         debt_color = "🟡"  # Moderate risk
                     
-                    embed.add_field(
-                        name="Debt Ratio",
-                        value=f"{debt_color} {debt_ratio:.2f}%",
-                        inline=True
-                    )
+                    fields.append(("Debt Ratio", f"{debt_color} {debt_ratio:.2f}%", True))
                 
                 # Add base asset information (e.g., BTC)
                 if "baseAsset" in asset_info:
@@ -693,11 +627,7 @@ class TradingCommands(commands.Cog):
                         repay_status = "Enabled" if base_asset['repayEnabled'] else "Disabled"
                         base_info.append(f"Repayment: {repay_status}")
                     
-                    embed.add_field(
-                        name=f"{base_currency} (Base Asset)",
-                        value="\n".join(base_info),
-                        inline=False
-                    )
+                    fields.append((f"{base_currency} (Base Asset)", "\n".join(base_info), False))
                 
                 # Add quote asset information (e.g., USDT)
                 if "quoteAsset" in asset_info:
@@ -720,33 +650,38 @@ class TradingCommands(commands.Cog):
                         repay_status = "Enabled" if quote_asset['repayEnabled'] else "Disabled"
                         quote_info.append(f"Repayment: {repay_status}")
                     
-                    embed.add_field(
-                        name=f"{quote_currency} (Quote Asset)",
-                        value="\n".join(quote_info),
-                        inline=False
-                    )
+                    fields.append((f"{quote_currency} (Quote Asset)", "\n".join(quote_info), False))
                 
                 # Add portfolio summary if available
                 if "totalAssetOfQuoteCurrency" in account_data:
-                    embed.add_field(
-                        name="Total Assets (Quote Currency)",
-                        value=f"${float(account_data['totalAssetOfQuoteCurrency']):.2f}",
-                        inline=True
-                    )
+                    fields.append((
+                        "Total Assets (Quote Currency)",
+                        f"${float(account_data['totalAssetOfQuoteCurrency']):.2f}",
+                        True
+                    ))
                 
                 if "totalLiabilityOfQuoteCurrency" in account_data:
-                    embed.add_field(
-                        name="Total Liabilities (Quote Currency)",
-                        value=f"${float(account_data['totalLiabilityOfQuoteCurrency']):.2f}",
-                        inline=True
-                    )
+                    fields.append((
+                        "Total Liabilities (Quote Currency)",
+                        f"${float(account_data['totalLiabilityOfQuoteCurrency']):.2f}",
+                        True
+                    ))
                 
-                # Add timestamp if available
+                # Create timestamp footer if available
+                footer_text = None
                 if "timestamp" in account_data:
-                    from datetime import datetime
                     timestamp = int(account_data["timestamp"]) / 1000  # Convert ms to seconds
                     date_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
-                    embed.set_footer(text=f"Last updated: {date_str}")
+                    footer_text = f"Last updated: {date_str}"
+                
+                # Create the embed using utility
+                embed = create_alert_embed(
+                    title=f"🏦 {symbol} Isolated Margin Account",
+                    description="Your KuCoin isolated margin account information",
+                    fields=fields,
+                    color=discord.Color.blue(),
+                    footer_text=footer_text
+                )
                 
                 # Edit the processing message with the embed
                 await processing_message.edit(content=None, embed=embed)
@@ -789,20 +724,8 @@ class TradingCommands(commands.Cog):
                 await ctx.send("No trades found matching your criteria.")
                 return
                 
-            # Create embed for displaying trades
-            embed = discord.Embed(
-                title=f"Isolated Margin Trades for {symbol}",
-                description=f"Showing up to {limit} recent trades",
-                color=discord.Color.gold(),
-            )
-            
-            # Add pagination info if available
-            if "totalNum" in trades_data.get("data", {}):
-                total = trades_data["data"]["totalNum"]
-                current_page = trades_data["data"].get("currentPage", 1)
-                total_pages = trades_data["data"].get("totalPage", 1)
-                
-                embed.set_footer(text=f"Page {current_page} of {total_pages} (Total: {total} trades)")
+            # Create fields for trades
+            fields = []
             
             # Format and add trade information to the embed
             for i, trade in enumerate(trades):
@@ -840,7 +763,6 @@ class TradingCommands(commands.Cog):
                     
                 # Add timestamp
                 if "createdAt" in trade:
-                    from datetime import datetime
                     timestamp = int(trade["createdAt"]) / 1000  # Convert ms to seconds
                     date_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
                     details.append(f"Time: {date_str}")
@@ -855,17 +777,34 @@ class TradingCommands(commands.Cog):
                 value = "\n".join(details)
                 
                 # Add field to embed
-                embed.add_field(name=field_title, value=value, inline=False)
+                fields.append((field_title, value, False))
                 
                 # If we're showing many trades, limit to avoid exceeding Discord's limits
                 if i >= 9 and len(trades) > 10:
                     remaining = len(trades) - 10
-                    embed.add_field(
-                        name=f"+ {remaining} more trades", 
-                        value=f"Use `!list_trades {symbol} {min(10, remaining)}` to see fewer trades at once",
-                        inline=False
-                    )
+                    fields.append((
+                        f"+ {remaining} more trades", 
+                        f"Use `!list_trades {symbol} {min(10, remaining)}` to see fewer trades at once",
+                        False
+                    ))
                     break
+            
+            # Add pagination info for footer
+            footer_text = None
+            if "totalNum" in trades_data.get("data", {}):
+                total = trades_data["data"]["totalNum"]
+                current_page = trades_data["data"].get("currentPage", 1)
+                total_pages = trades_data["data"].get("totalPage", 1)
+                footer_text = f"Page {current_page} of {total_pages} (Total: {total} trades)"
+            
+            # Create the embed using utility
+            embed = create_alert_embed(
+                title=f"Isolated Margin Trades for {symbol}",
+                description=f"Showing up to {limit} recent trades",
+                fields=fields,
+                color=discord.Color.gold(),
+                footer_text=footer_text
+            )
             
             await ctx.send(embed=embed)
             
@@ -877,62 +816,42 @@ class TradingCommands(commands.Cog):
         """
         Interactive command to filter and display your isolated margin trade history
         """
-        # Helper function for collecting user input
-        async def get_user_input(prompt, timeout=60, validator=None):
-            prompt_msg = await ctx.send(prompt)
-
-            def check(message):
-                return message.author == ctx.author and message.channel == ctx.channel
-
-            try:
-                user_response = await self.bot.wait_for(
-                    "message", timeout=timeout, check=check
-                )
-                if user_response.content.lower() in ["cancel", "exit", "quit"]:
-                    await ctx.send("🛑 Command cancelled.")
-                    return None
-                    
-                if validator:
-                    result, error_msg = validator(user_response.content)
-                    if not result:
-                        await ctx.send(f"❌ {error_msg} Please try again or type 'cancel' to exit.")
-                        return await get_user_input(prompt, timeout, validator)
-                return user_response.content
-            except asyncio.TimeoutError:
-                await ctx.send("⏱️ No input received. Command cancelled.")
-                return None
-
         # Ask for symbol (optional)
         symbol_prompt = "Enter the trading pair (e.g., BTC-USDT) or type 'skip' to see all symbols:"
-        def validate_symbol(value):
+        def validate_symbol_or_skip(value):
             if value.lower() == "skip":
                 return True, ""
-            value = value.upper()
-            if "-" in value and len(value.split("-")) == 2:
-                return True, ""
-            return False, f"Symbol {value} doesn't seem to be in the correct format (e.g., BTC-USDT)."
+            return validate_symbol(value)
         
-        symbol_response = await get_user_input(symbol_prompt, validator=validate_symbol)
+        symbol_response = await get_user_input(
+            ctx, 
+            symbol_prompt, 
+            validator=validate_symbol_or_skip
+        )
+        
         if symbol_response is None:
             return
         
         symbol = None if symbol_response.lower() == "skip" else symbol_response.upper()
         
         # Ask for side (optional)
-        side_prompt = "Filter by side? Enter 'buy', 'sell', or 'skip' to see both:"
-        def validate_side(value):
-            if value.lower() in ["buy", "sell", "skip"]:
+        def validate_side_or_skip(value):
+            if value.lower() == "skip":
                 return True, ""
-            return False, "Invalid side. Please enter 'buy', 'sell', or 'skip'."
+            return validate_side(value)
         
-        side_response = await get_user_input(side_prompt, validator=validate_side)
+        side_response = await get_user_input(
+            ctx,
+            "Filter by side? Enter 'buy', 'sell', or 'skip' to see both:",
+            validator=validate_side_or_skip
+        )
+        
         if side_response is None:
             return
         
         side = None if side_response.lower() == "skip" else side_response.lower()
         
         # Ask for time period (optional)
-        time_prompt = "Enter time period in days (e.g., 7 for past week) or 'skip' for default:"
         def validate_days(value):
             if value.lower() == "skip":
                 return True, ""
@@ -944,14 +863,18 @@ class TradingCommands(commands.Cog):
             except:
                 return False, "Invalid number. Please enter a number between 1 and 30."
         
-        days_response = await get_user_input(time_prompt, validator=validate_days)
+        days_response = await get_user_input(
+            ctx,
+            "Enter time period in days (e.g., 7 for past week) or 'skip' for default:",
+            validator=validate_days
+        )
+        
         if days_response is None:
             return
         
         days = None if days_response.lower() == "skip" else int(days_response)
         
         # Ask for limit (optional)
-        limit_prompt = "Enter maximum number of trades to show (1-20) or 'skip' for default:"
         def validate_limit(value):
             if value.lower() == "skip":
                 return True, ""
@@ -963,7 +886,12 @@ class TradingCommands(commands.Cog):
             except:
                 return False, "Invalid number. Please enter a number between 1 and 20."
         
-        limit_response = await get_user_input(limit_prompt, validator=validate_limit)
+        limit_response = await get_user_input(
+            ctx,
+            "Enter maximum number of trades to show (1-20) or 'skip' for default:",
+            validator=validate_limit
+        )
+        
         if limit_response is None:
             return
         
@@ -973,7 +901,6 @@ class TradingCommands(commands.Cog):
         start_at = None
         end_at = None
         if days:
-            from datetime import datetime, timedelta
             end_at = int(datetime.now().timestamp() * 1000)
             start_at = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
         
@@ -1007,20 +934,14 @@ class TradingCommands(commands.Cog):
                 await ctx.send("No trades found matching your criteria.")
                 return
                 
-            # Create embed for displaying trades
+            # Create title with filters info
             title = f"Filtered Isolated Margin Trades ({len(trades)})"
             if symbol:
                 title += f" for {symbol}"
             if side:
                 title += f" - {side.upper()}"
                 
-            embed = discord.Embed(
-                title=title,
-                description="Your KuCoin isolated margin trade history",
-                color=discord.Color.gold(),
-            )
-            
-            # Add filter information
+            # Create fields with filter info
             filter_info = []
             if symbol:
                 filter_info.append(f"Symbol: {symbol}")
@@ -1031,22 +952,11 @@ class TradingCommands(commands.Cog):
             if limit:
                 filter_info.append(f"Limit: {limit} trades")
                 
+            field_list = []
             if filter_info:
-                embed.add_field(
-                    name="Applied Filters",
-                    value="\n".join(filter_info),
-                    inline=False
-                )
+                field_list.append(("Applied Filters", "\n".join(filter_info), False))
             
-            # Add pagination info if available
-            if "totalNum" in trades_data.get("data", {}):
-                total = trades_data["data"]["totalNum"]
-                current_page = trades_data["data"].get("currentPage", 1)
-                total_pages = trades_data["data"].get("totalPage", 1)
-                
-                embed.set_footer(text=f"Page {current_page} of {total_pages} (Total: {total} trades)")
-            
-            # Format and add trade information to the embed (same as in list_trades)
+            # Format and add trade information to the fields
             for i, trade in enumerate(trades):
                 # Create a field title with trade number and symbol
                 field_title = f"Trade #{i+1}: {trade.get('symbol', 'Unknown')}"
@@ -1082,7 +992,6 @@ class TradingCommands(commands.Cog):
                     
                 # Add timestamp
                 if "createdAt" in trade:
-                    from datetime import datetime
                     timestamp = int(trade["createdAt"]) / 1000  # Convert ms to seconds
                     date_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
                     details.append(f"Time: {date_str}")
@@ -1096,24 +1005,39 @@ class TradingCommands(commands.Cog):
                 # Join all details with newlines
                 value = "\n".join(details)
                 
-                # Add field to embed
-                embed.add_field(name=field_title, value=value, inline=False)
+                field_list.append((field_title, value, False))
                 
                 # If we're showing many trades, limit to avoid exceeding Discord's limits
                 if i >= 9 and len(trades) > 10:
                     remaining = len(trades) - 10
-                    embed.add_field(
-                        name=f"+ {remaining} more trades", 
-                        value=f"Run this command again with a smaller limit to see fewer trades at once",
-                        inline=False
-                    )
+                    field_list.append((
+                        f"+ {remaining} more trades", 
+                        f"Run this command again with a smaller limit to see fewer trades at once",
+                        False
+                    ))
                     break
+            
+            # Add pagination info for footer
+            footer_text = None
+            if "totalNum" in trades_data.get("data", {}):
+                total = trades_data["data"]["totalNum"]
+                current_page = trades_data["data"].get("currentPage", 1)
+                total_pages = trades_data["data"].get("totalPage", 1)
+                footer_text = f"Page {current_page} of {total_pages} (Total: {total} trades)"
+            
+            # Create the embed using utility
+            embed = create_alert_embed(
+                title=title,
+                description="Your KuCoin isolated margin trade history",
+                fields=field_list,
+                color=discord.Color.gold(),
+                footer_text=footer_text
+            )
             
             await ctx.send(embed=embed)
             
         except Exception as e:
             await ctx.send(f"❌ Error processing request: {str(e)}")
-
 
     @commands.command(name="last_trade")
     async def last_trade(self, ctx, symbol: str = "BTC-USDT"):
@@ -1146,93 +1070,61 @@ class TradingCommands(commands.Cog):
             
             # Get just the most recent trade
             trade = trades[0]
-            
-            # Create a compact embed for the single trade
             side = trade.get("side", "unknown")
-            side_emoji = "🟢" if side == "buy" else "🔴" if side == "sell" else "⚪"
             
-            embed = discord.Embed(
+            # Calculate time since trade
+            timestamp = int(trade.get("createdAt", datetime.now().timestamp() * 1000)) / 1000
+            trade_time = datetime.fromtimestamp(timestamp)
+            time_diff = datetime.now() - trade_time
+            
+            # Format time difference in a human-readable way
+            if time_diff.days > 0:
+                time_ago = f"{time_diff.days} days ago"
+            elif time_diff.seconds >= 3600:
+                time_ago = f"{time_diff.seconds // 3600} hours ago"
+            elif time_diff.seconds >= 60:
+                time_ago = f"{time_diff.seconds // 60} minutes ago"
+            else:
+                time_ago = f"{time_diff.seconds} seconds ago"
+            
+            # Create order data for the embed
+            order_data = {
+                "symbol": symbol,
+                "side": side,
+                "type": trade.get("type", "unknown"),
+                "price": trade.get("price", 0),
+                "size": trade.get("size", 0),
+                "funds": trade.get("funds", 0),
+                "fee": trade.get("fee", 0),
+                "feeCurrency": trade.get("feeCurrency", ""),
+                "liquidity": trade.get("liquidity", ""),
+                "orderId": trade.get("orderId", "")
+            }
+            
+            # Format timestamp
+            date_str = trade_time.strftime("%Y-%m-%d %H:%M:%S")
+            footer_text = f"{date_str} ({time_ago})"
+            
+            # Create the embed using utility
+            side_emoji = "🟢" if side == "buy" else "🔴" if side == "sell" else "⚪"
+            embed = create_order_embed(
+                order_data=order_data,
                 title=f"{side_emoji} Last {symbol} Trade: {side.upper()}",
-                color=discord.Color.green() if side == "buy" else discord.Color.red(),
+                is_success=True,
+                order_type=trade.get("type", "unknown"),
+                side=side,
+                include_id=True
             )
             
-            # Add core trade details
-            if "price" in trade and "size" in trade:
-                embed.add_field(
-                    name="Price",
-                    value=f"${float(trade['price']):.8f}",
-                    inline=True
-                )
-                embed.add_field(
-                    name="Size",
-                    value=f"{float(trade['size']):.8f}",
-                    inline=True
-                )
+            # Set the footer with time information
+            embed.set_footer(text=footer_text)
             
-            # Add total value
-            if "funds" in trade:
-                embed.add_field(
-                    name="Total Value",
-                    value=f"${float(trade['funds']):.8f}",
-                    inline=True
-                )
-            
-            # Add fee details
-            if "fee" in trade and "feeCurrency" in trade:
-                embed.add_field(
-                    name="Fee",
-                    value=f"{float(trade['fee']):.8f} {trade['feeCurrency']}",
-                    inline=True
-                )
-            
-            # Add order type and liquidity role
-            if "type" in trade:
-                embed.add_field(
-                    name="Type",
-                    value=f"{trade['type']}",
-                    inline=True
-                )
-            
-            if "liquidity" in trade:
-                embed.add_field(
-                    name="Role",
-                    value=f"{trade['liquidity']}",
-                    inline=True
-                )
-            
-            # Add timestamp
-            if "createdAt" in trade:
-                from datetime import datetime
-                timestamp = int(trade["createdAt"]) / 1000  # Convert ms to seconds
-                date_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
-                
-                # Calculate time since trade
-                now = datetime.now()
-                trade_time = datetime.fromtimestamp(timestamp)
-                time_diff = now - trade_time
-                
-                # Format time difference in a human-readable way
-                if time_diff.days > 0:
-                    time_ago = f"{time_diff.days} days ago"
-                elif time_diff.seconds >= 3600:
-                    time_ago = f"{time_diff.seconds // 3600} hours ago"
-                elif time_diff.seconds >= 60:
-                    time_ago = f"{time_diff.seconds // 60} minutes ago"
-                else:
-                    time_ago = f"{time_diff.seconds} seconds ago"
-                
-                embed.set_footer(text=f"{date_str} ({time_ago})")
-            
-            # Add order ID as a smaller note
+            # Send the message and add clipboard reaction if there's an order ID
             if "orderId" in trade:
-                order_id = trade["orderId"]
-                embed.description = f"Order ID: {order_id}"
-                
-                # Add this as a message to potentially copy
                 message = await ctx.send(embed=embed)
                 await message.add_reaction("📋")
                 # Store the order ID
-                self.order_id_messages[message.id] = order_id
+                self.order_id_messages[message.id] = trade["orderId"]
             else:
                 await ctx.send(embed=embed)
             
@@ -1257,38 +1149,26 @@ class TradingCommands(commands.Cog):
         
         # If no order ID was provided, ask for it interactively
         if not order_id:
-            await ctx.send("Please enter the order ID you want to cancel:")
+            order_id = await get_user_input(
+                ctx,
+                "Please enter the order ID you want to cancel:",
+                timeout=30
+            )
             
-            def check(message):
-                return message.author == ctx.author and message.channel == ctx.channel
-            
-            try:
-                response = await self.bot.wait_for("message", timeout=30, check=check)
-                order_id = response.content.strip()
-            except asyncio.TimeoutError:
-                await ctx.send("⏱️ No response received. Cancellation aborted.")
-                return
+            if not order_id:
+                return  # User cancelled or timed out
         
         # Confirmation before proceeding
-        confirm_embed = discord.Embed(
+        confirmed = await confirm_action(
+            ctx,
             title="⚠️ Confirm Order Cancellation",
             description=f"Are you sure you want to cancel order ID: `{order_id}`?",
-            color=discord.Color.gold()
+            color=discord.Color.gold(),
+            use_reactions=False  # Use text confirmation instead
         )
-        confirm_embed.set_footer(text="Reply with 'yes' to confirm or 'no' to abort")
         
-        await ctx.send(embed=confirm_embed)
-        
-        def confirm_check(message):
-            return message.author == ctx.author and message.channel == ctx.channel and message.content.lower() in ["yes", "no"]
-        
-        try:
-            response = await self.bot.wait_for("message", timeout=30, check=confirm_check)
-            if response.content.lower() != "yes":
-                await ctx.send("🛑 Order cancellation aborted.")
-                return
-        except asyncio.TimeoutError:
-            await ctx.send("⏱️ No confirmation received. Cancellation aborted.")
+        if not confirmed:
+            await ctx.send("🛑 Order cancellation aborted.")
             return
         
         # Process the cancellation
@@ -1301,42 +1181,39 @@ class TradingCommands(commands.Cog):
             
             # Check if the API call was successful
             if result and result.get("code") == "200000":
-                # Success message
-                success_embed = discord.Embed(
+                # Create fields for success message
+                fields = []
+                
+                # Add cancelled order ID if available
+                if "data" in result:
+                    cancelled_id = result["data"]
+                    if cancelled_id:
+                        fields.append(("Cancelled Order ID", f"`{cancelled_id}`", False))
+                
+                # Create success embed using utility
+                embed = create_alert_embed(
                     title="✅ Order Cancelled Successfully",
-                    description=f"The order has been cancelled.",
+                    description="The order has been cancelled.",
+                    fields=fields,
                     color=discord.Color.green()
                 )
                 
-                # Add any additional information returned by the API
-                if "data" in result:
-                    # The API might return the cancelled order ID in the data field
-                    cancelled_id = result["data"]
-                    if cancelled_id:
-                        success_embed.add_field(
-                            name="Cancelled Order ID", 
-                            value=f"`{cancelled_id}`",
-                            inline=False
-                        )
-                
                 # Edit the processing message with success info
-                await processing_message.edit(content=None, embed=success_embed)
+                await processing_message.edit(content=None, embed=embed)
             else:
                 # Error message
                 error_msg = result.get("msg", "Unknown error") if result else "No response from server"
-                error_embed = discord.Embed(
+                
+                # Create error embed using utility
+                embed = create_alert_embed(
                     title="❌ Error Cancelling Order",
                     description=f"Failed to cancel order: {error_msg}",
+                    fields=[("Order ID", f"`{order_id}`", False)],
                     color=discord.Color.red()
-                )
-                error_embed.add_field(
-                    name="Order ID", 
-                    value=f"`{order_id}`",
-                    inline=False
                 )
                 
                 # Edit the processing message with error info
-                await processing_message.edit(content=None, embed=error_embed)
+                await processing_message.edit(content=None, embed=embed)
         
         except Exception as e:
             # Handle any exceptions during the process

@@ -1,11 +1,8 @@
 import discord
 from discord.ext import commands, tasks
-import asyncio
 from datetime import datetime, time, timedelta
 import json
 import os
-from typing import Dict, List, Optional
-from api import PricesAPI
 from logging_setup import get_logger
 
 # Create module logger

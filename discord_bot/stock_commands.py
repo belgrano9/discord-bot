@@ -1,48 +1,45 @@
-import os
 import discord
 from discord.ext import commands
-from discord import Embed
 import polars as pl
-from typing import List, Dict, Any
+from datetime import datetime, timedelta
+from loguru import logger
 
-# Import your API classes
-from api import FinancialAPI, PricesAPI
-from logging_setup import get_logger
+# Import the async API clients
+from api.financial import AsyncFinancialAPI
+from api.prices import AsyncPricesAPI
 
-# Create module logger
-logger = get_logger("stock_commands")
+# Import the utility functions for embeds
+from utils.embed_utilities import (
+    create_price_embed,
+    create_alert_embed,
+    format_large_number,
+    format_field_name
+)
+
 
 class StockCommands(commands.Cog):
     """Discord commands for interacting with financial data"""
 
     def __init__(self, bot):
         self.bot = bot
-        logger.info("Initializing StockCommands cog")
+        logger.info("Stock commands initialized")
 
     @commands.command(name="stock")
     async def stock_snapshot(self, ctx, ticker: str):
         """Get a snapshot of key financial metrics for a stock"""
-        logger.info(f"{ctx.author} requested stock snapshot for {ticker}")
         await ctx.send(f"Fetching data for {ticker}...")
 
         try:
-            # Get financial snapshot
-            logger.debug(f"Getting financial snapshot for {ticker}")
-            fin_api = FinancialAPI(ticker=ticker.upper())
-            snapshot = fin_api.get_snapshots()
+            # Get financial snapshot using async API
+            fin_api = AsyncFinancialAPI(ticker=ticker.upper())
+            snapshot = await fin_api.get_snapshots()
 
             if not snapshot:
-                logger.warning(f"No data found for {ticker}")
                 await ctx.send(f"No data found for {ticker}.")
                 return
 
-            # Create embed with financial data
-            logger.debug(f"Creating embed for {ticker} financial snapshot")
-            embed = Embed(
-                title=f"{ticker.upper()} Financial Snapshot", color=discord.Color.blue()
-            )
-
-            # Add key metrics to the embed
+            # Create fields for the embed
+            fields = []
             metrics = [
                 ("Market Cap", "market_cap", "$"),
                 ("P/E Ratio", "pe_ratio", ""),
@@ -62,7 +59,7 @@ class StockCommands(commands.Cog):
                         # Format the value appropriately
                         if isinstance(value, (int, float)):
                             if key in ["market_cap"]:
-                                value = f"{prefix}{self._format_large_number(value)}"
+                                value = f"{prefix}{format_large_number(value)}"
                             elif key in [
                                 "dividend_yield",
                                 "return_on_equity",
@@ -71,11 +68,18 @@ class StockCommands(commands.Cog):
                                 value = f"{prefix}{value:.2f}"
                             else:
                                 value = f"{prefix}{value:.2f}"
-                        embed.add_field(name=label, value=value, inline=True)
-                        logger.debug(f"Added {label}: {value} to embed")
+                        fields.append((label, value, True))
+
+            # Create embed with custom fields
+            embed = create_alert_embed(
+                title=f"{ticker.upper()} Financial Snapshot",
+                description="Key financial metrics and ratios",
+                fields=fields,
+                color=discord.Color.blue()
+            )
 
             await ctx.send(embed=embed)
-            logger.info(f"Sent financial snapshot for {ticker} to {ctx.author}")
+            logger.info(f"Successfully sent financial snapshot for {ticker}")
 
         except Exception as e:
             logger.error(f"Error fetching data for {ticker}: {str(e)}")
@@ -90,24 +94,18 @@ class StockCommands(commands.Cog):
         !price MSFT 7 - Get Microsoft price data for past 7 days
         """
         if ticker is None:
-            logger.debug(f"{ctx.author} requested price without ticker")
             await ctx.send("Please provide a ticker symbol. Example: !price AAPL")
             return
 
-        logger.info(f"{ctx.author} requested price data for {ticker} over {days} days")
         await ctx.send(f"Fetching price data for {ticker}...")
 
         try:
             # Calculate dates based on requested days
-            from datetime import datetime, timedelta
-
             end_date = datetime.now().strftime("%Y-%m-%d")
             start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-            logger.debug(f"Date range: {start_date} to {end_date}")
 
-            # Get price data
-            logger.debug(f"Getting price data for {ticker}")
-            price_api = PricesAPI(
+            # Get price data using async API
+            price_api = AsyncPricesAPI(
                 ticker=ticker.upper(),
                 interval="day",
                 interval_multiplier=1,
@@ -116,74 +114,42 @@ class StockCommands(commands.Cog):
                 limit=days,
             )
 
-            prices = price_api.get_prices()
+            prices = await price_api.get_prices()
 
             if not prices:
-                logger.warning(f"No price data found for {ticker}")
                 await ctx.send(f"No price data found for {ticker}.")
                 return
 
             # If only requesting latest price (days=1)
             if days == 1:
-                logger.debug(f"Processing latest price for {ticker}")
                 # Get just the latest price
                 if isinstance(prices, list) and len(prices) > 0:
                     latest = prices[0]  # Assuming most recent is first
-                    logger.debug(f"Latest price data: {latest}")
-
-                    # Create simple embed with latest price
-                    embed = Embed(
-                        title=f"{ticker.upper()} Latest Price",
-                        color=discord.Color.blue(),
-                    )
-
-                    # Add basic price info
-                    if "close" in latest:
-                        embed.add_field(
-                            name="Price", value=f"${latest['close']:.2f}", inline=True
-                        )
-                        logger.debug(f"Close price: ${latest['close']:.2f}")
-
-                    # Add additional fields if available
-                    fields = [
-                        ("open", "Open"),
-                        ("high", "High"),
-                        ("low", "Low"),
-                        ("volume", "Volume"),
-                    ]
-
-                    for key, label in fields:
-                        if key in latest:
-                            value = latest[key]
-                            if key == "volume":
-                                value = self._format_large_number(value)
-                            else:
-                                value = f"${value:.2f}"
-                            embed.add_field(name=label, value=value, inline=True)
-                            logger.debug(f"Added {label}: {value}")
-
-                    # Add date
+                    
+                    # Find the date field in the data
                     date_field = next(
-                        (
-                            k
-                            for k in latest.keys()
-                            if "date" in k.lower() or "time" in k.lower()
-                        ),
-                        None,
+                        (k for k in latest.keys() if "date" in k.lower() or "time" in k.lower()),
+                        None
                     )
-                    if date_field:
-                        embed.set_footer(text=f"Date: {latest[date_field]}")
-                        logger.debug(f"Date: {latest[date_field]}")
+                    
+                    # Create footer text with date if available
+                    footer_text = f"Date: {latest[date_field]}" if date_field else None
+                    
+                    # Use the utility function to create price embed
+                    embed = create_price_embed(
+                        symbol=ticker.upper(),
+                        price_data=latest,
+                        title_prefix="Latest",
+                        footer_text=footer_text
+                    )
 
                     await ctx.send(embed=embed)
-                    logger.info(f"Sent latest price for {ticker} to {ctx.author}")
+                    logger.info(f"Successfully sent price data for {ticker}")
                     return
 
             # For historical data (days > 1)
             try:
-                logger.debug(f"Processing historical price data for {ticker} ({len(prices)} records)")
                 df = pl.DataFrame(prices)
-                logger.debug(f"Created DataFrame with columns: {df.columns}")
 
                 # Get the date column name
                 date_column = next(
@@ -196,7 +162,6 @@ class StockCommands(commands.Cog):
                 )
 
                 if not date_column:
-                    logger.warning(f"Could not identify date column for {ticker}")
                     await ctx.send(
                         f"Could not identify date column. Available columns: {df.columns}"
                     )
@@ -204,9 +169,7 @@ class StockCommands(commands.Cog):
 
                 # Get latest price and change
                 latest = df.sort(date_column, descending=True).head(1)
-                logger.debug(f"Latest row: {latest}")
                 latest_price = latest["close"][0]
-                logger.debug(f"Latest price: ${latest_price}")
 
                 # Calculate price change
                 if len(df) > 1:
@@ -215,48 +178,32 @@ class StockCommands(commands.Cog):
                     ][0]
                     price_change = latest_price - prev_close
                     price_change_pct = (price_change / prev_close) * 100
-                    logger.debug(f"Previous close: ${prev_close}, change: ${price_change} ({price_change_pct:.2f}%)")
                 else:
                     price_change = 0
                     price_change_pct = 0
-                    logger.debug("Not enough data to calculate price change")
-
-                # Create embed with price data
-                embed = Embed(
-                    title=f"{ticker.upper()} Price Data",
-                    description=f"Last {days} days",
-                    color=(
-                        discord.Color.green()
-                        if price_change >= 0
-                        else discord.Color.red()
-                    ),
-                )
-
-                # Add price info
-                embed.add_field(
-                    name="Latest Close", value=f"${latest_price:.2f}", inline=True
-                )
-                embed.add_field(
-                    name="Change",
-                    value=f"${price_change:.2f} ({price_change_pct:.2f}%)",
-                    inline=True,
-                )
-
-                # Add volume
+                
+                # Prepare data for the price embed
+                price_data = {
+                    "price": latest_price,
+                    "change": price_change,
+                    "change_percent": price_change_pct,
+                }
+                
+                # Add volume if available
                 if "volume" in latest.columns:
-                    volume_value = self._format_large_number(latest["volume"][0])
-                    embed.add_field(
-                        name="Volume",
-                        value=volume_value,
-                        inline=True,
-                    )
-                    logger.debug(f"Volume: {volume_value}")
-
-                # Add date
-                embed.set_footer(text=f"Date: {latest[date_column][0]}")
+                    price_data["volume"] = latest["volume"][0]
+                
+                # Create embed with the utility function
+                embed = create_price_embed(
+                    symbol=ticker.upper(),
+                    price_data=price_data,
+                    title_prefix=f"{days}-Day",
+                    footer_text=f"Date: {latest[date_column][0]}" if date_column else None,
+                    color_based_on_change=True
+                )
 
                 await ctx.send(embed=embed)
-                logger.info(f"Sent historical price data for {ticker} to {ctx.author}")
+                logger.info(f"Successfully sent {days}-day price data for {ticker}")
 
             except Exception as e:
                 logger.error(f"Error processing price data for {ticker}: {str(e)}")
@@ -270,23 +217,17 @@ class StockCommands(commands.Cog):
     async def live_price(self, ctx, ticker: str = None):
         """Get the latest live price for a stock"""
         if ticker is None:
-            logger.debug(f"{ctx.author} requested live price without ticker")
             await ctx.send("Please provide a ticker symbol. Example: !live AAPL")
             return
 
-        logger.info(f"{ctx.author} requested live price for {ticker}")
         await ctx.send(f"Fetching live price for {ticker}...")
 
         try:
             # Calculate current date for API parameters
-            from datetime import datetime
-
             today = datetime.now().strftime("%Y-%m-%d")
-            logger.debug(f"Using today's date: {today}")
 
-            # Use PricesAPI for live price
-            logger.debug(f"Getting live price for {ticker}")
-            price_api = PricesAPI(
+            # Use AsyncPricesAPI for live price
+            price_api = AsyncPricesAPI(
                 ticker=ticker.upper(),
                 interval="day",
                 interval_multiplier=1,
@@ -295,57 +236,23 @@ class StockCommands(commands.Cog):
                 limit=1,
             )
 
-            snapshot = price_api.get_live_price()
+            snapshot = await price_api.get_live_price()
 
             if not snapshot:
-                logger.warning(f"No live price data found for {ticker}")
                 await ctx.send(f"No live price data found for {ticker}.")
                 return
 
-            logger.debug(f"Live price data: {snapshot}")
-
-            # Create embed with price data
-            embed = Embed(
-                title=f"{ticker.upper()} Live Price",
-                color=(
-                    discord.Color.green()
-                    if snapshot.get("change_percent", 0) >= 0
-                    else discord.Color.red()
-                ),
+            # Use utility function to create the embed
+            embed = create_price_embed(
+                symbol=ticker.upper(),
+                price_data=snapshot,
+                title_prefix="Live",
+                footer_text=f"Last updated: {snapshot.get('timestamp', 'N/A')}",
+                show_additional_fields=True
             )
 
-            # Add price fields
-            fields = [
-                ("Price", "price", "$"),
-                ("Change", "change", "$"),
-                ("Change %", "change_percent", "%"),
-                ("Volume", "volume", ""),
-                ("Open", "open", "$"),
-                ("High", "high", "$"),
-                ("Low", "low", "$"),
-                ("Previous Close", "prev_close", "$"),
-            ]
-
-            for label, key, prefix in fields:
-                if key in snapshot and snapshot[key] is not None:
-                    value = snapshot[key]
-                    if key == "volume":
-                        formatted_value = self._format_large_number(value)
-                    elif isinstance(value, (int, float)):
-                        formatted_value = f"{prefix}{value:.2f}"
-                    else:
-                        formatted_value = f"{prefix}{value}"
-
-                    embed.add_field(name=label, value=formatted_value, inline=True)
-                    logger.debug(f"Added {label}: {formatted_value}")
-
-            # Add timestamp if available
-            if "timestamp" in snapshot:
-                embed.set_footer(text=f"Last updated: {snapshot['timestamp']}")
-                logger.debug(f"Timestamp: {snapshot['timestamp']}")
-
             await ctx.send(embed=embed)
-            logger.info(f"Sent live price for {ticker} to {ctx.author}")
+            logger.info(f"Successfully sent live price for {ticker}")
 
         except Exception as e:
             logger.error(f"Error fetching live price for {ticker}: {str(e)}")
@@ -357,33 +264,31 @@ class StockCommands(commands.Cog):
 
         statement_type options: income, balance, cash
         """
-        logger.info(f"{ctx.author} requested {statement_type} statement for {ticker}")
         await ctx.send(f"Fetching {statement_type} statement for {ticker}...")
 
         valid_types = ["income", "balance", "cash"]
         if statement_type not in valid_types:
-            logger.warning(f"Invalid statement type: {statement_type}")
             await ctx.send(
                 f"Invalid statement type. Choose from: {', '.join(valid_types)}"
             )
             return
 
         try:
-            logger.debug(f"Getting {statement_type} statement for {ticker}")
-            fin_api = FinancialAPI(ticker=ticker.upper(), period="annual", limit=1)
+            # Initialize async API client
+            fin_api = AsyncFinancialAPI(ticker=ticker.upper(), period="annual", limit=1)
 
+            # Get appropriate statement type
             if statement_type == "income":
-                data = fin_api.get_income_statements()
+                data = await fin_api.get_income_statements()
                 title = "Income Statement"
             elif statement_type == "balance":
-                data = fin_api.get_balance_sheet()
+                data = await fin_api.get_balance_sheet()
                 title = "Balance Sheet"
             else:  # cash
-                data = fin_api.get_cash_flow_statement()
+                data = await fin_api.get_cash_flow_statement()
                 title = "Cash Flow Statement"
 
             if not data:
-                logger.warning(f"No {statement_type} statement data found for {ticker}")
                 await ctx.send(
                     f"No {statement_type} statement data found for {ticker}."
                 )
@@ -391,74 +296,49 @@ class StockCommands(commands.Cog):
 
             # Take most recent statement
             statement = data[0] if isinstance(data, list) and len(data) > 0 else data
-            logger.debug(f"Using most recent statement for {ticker}")
 
-            # Create embed with financial data
-            embed = Embed(
-                title=f"{ticker.upper()} {title}",
-                description=f"Period: {statement.get('period', 'Annual')}",
-                color=discord.Color.blue(),
-            )
-
-            # Add key items from the statement (limit to 25 fields due to Discord limits)
+            # Create fields for the financials statement
+            fields = []
             counter = 0
+            
             for key, value in statement.items():
                 if key in ["ticker", "period", "fiscal_year", "fiscal_period"]:
                     continue
 
                 if counter >= 25:
-                    logger.debug("Reached maximum field limit (25) for Discord embed")
                     break
 
                 if isinstance(value, (int, float)) and value is not None:
-                    formatted_value = self._format_large_number(value)
-                    embed.add_field(
-                        name=self._format_field_name(key),
-                        value=f"${formatted_value}",
-                        inline=True,
+                    formatted_value = format_large_number(value)
+                    fields.append(
+                        (format_field_name(key), f"${formatted_value}", True)
                     )
-                    logger.debug(f"Added {key}: ${formatted_value}")
                     counter += 1
-
-            # Add date/period info
+            
+            # Create the embed
+            description = f"Period: {statement.get('period', 'Annual')}"
             if "fiscal_year" in statement:
-                embed.set_footer(text=f"Fiscal Year: {statement['fiscal_year']}")
-                logger.debug(f"Fiscal Year: {statement['fiscal_year']}")
+                footer_text = f"Fiscal Year: {statement['fiscal_year']}"
+            else:
+                footer_text = None
+                
+            embed = create_alert_embed(
+                title=f"{ticker.upper()} {title}",
+                description=description,
+                fields=fields,
+                color=discord.Color.blue(),
+                footer_text=footer_text
+            )
 
             await ctx.send(embed=embed)
-            logger.info(f"Sent {statement_type} statement for {ticker} to {ctx.author}")
+            logger.info(f"Successfully sent {statement_type} statement for {ticker}")
 
         except Exception as e:
             logger.error(f"Error fetching financial data for {ticker}: {str(e)}")
             await ctx.send(f"Error fetching financial data: {str(e)}")
 
-    def _format_large_number(self, num: float) -> str:
-        """Format large numbers with K, M, B suffixes"""
-        if num is None:
-            return "N/A"
-
-        abs_num = abs(num)
-        sign = "-" if num < 0 else ""
-
-        if abs_num >= 1_000_000_000:
-            return f"{sign}{abs_num/1_000_000_000:.2f}B"
-        elif abs_num >= 1_000_000:
-            return f"{sign}{abs_num/1_000_000:.2f}M"
-        elif abs_num >= 1_000:
-            return f"{sign}{abs_num/1_000:.2f}K"
-        else:
-            return f"{sign}{abs_num:.2f}"
-
-    def _format_field_name(self, name: str) -> str:
-        """Convert snake_case to Title Case with spaces"""
-        formatted = " ".join(word.capitalize() for word in name.split("_"))
-        logger.debug(f"Formatted field name: {name} -> {formatted}")
-        return formatted
-
 
 # In stock_commands.py, change the setup function to:
 async def setup(bot):
     """Add the StockCommands cog to the bot"""
-    logger.info("Setting up StockCommands cog")
     await bot.add_cog(StockCommands(bot))
-    logger.info("StockCommands cog setup complete")

@@ -1,7 +1,6 @@
 import requests
 import os
 from abc import ABC, abstractmethod
-import polars as pl
 from logging_setup import get_logger
 
 # Create module logger

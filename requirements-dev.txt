@@ -1,0 +1,9 @@
+# Testing dependencies
+pytest==7.3.1
+pytest-asyncio==0.21.0
+pytest-cov==4.1.0
+pytest-mock==3.10.0
+# Mock additional dependencies
+loguru==0.7.0
+rich==13.4.2
+polars==0.18.8

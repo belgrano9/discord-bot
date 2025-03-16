@@ -1,10 +1,9 @@
 import discord
 from discord.ext import commands, tasks
 import asyncio
-from typing import Dict, List, Optional, Union
 import json
 import os
-from api import PricesAPI
+from api.prices import PricesAPI
 from datetime import datetime
 from config import ALERT_CHANNEL_ID, CHECK_INTERVAL
 from logging_setup import get_logger
