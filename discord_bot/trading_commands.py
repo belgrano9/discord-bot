@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 from datetime import datetime
 import os
-from kucoin_handler import KucoinAPI
+from api.kucoin import AsyncKucoinAPI
 import uuid
 
 # Import utility functions
@@ -28,7 +28,7 @@ class TradingCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         # Initialize the KuCoin API client
-        self.kucoin = KucoinAPI(
+        self.kucoin = AsyncKucoinAPI(
             api_key=os.getenv("KUCOIN_API_KEY", ""),
             api_secret=os.getenv("KUCOIN_API_SECRET", ""),
             passphrase=os.getenv("KUCOIN_API_PASSPHRASE", "")

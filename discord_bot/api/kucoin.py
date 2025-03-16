@@ -14,7 +14,7 @@ import uuid
 from typing import Dict, Any, Tuple
 from loguru import logger
 import asyncio
-from discord_bot.api.base import AsyncBaseAPI, require_api_key, ApiKeyRequiredError
+from .base import AsyncBaseAPI, require_api_key, ApiKeyRequiredError
 
 
 class AsyncKucoinClient(AsyncBaseAPI):

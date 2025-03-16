@@ -2,11 +2,16 @@ import discord
 from discord.ext import commands, tasks
 import asyncio
 from datetime import datetime
-from kucoin_handler import KucoinAPI
-import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import polars as pl
 from loguru import logger
+
+# Import async API
+from api.kucoin import AsyncKucoinAPI
+
+# Import utility functions
+from utils.embed_utilities import create_price_embed, create_alert_embed
+
 
 class PriceTracker(commands.Cog):
     """Discord cog for tracking cryptocurrency prices in real-time"""
@@ -14,17 +19,14 @@ class PriceTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         # Initialize the KuCoin API client
-        self.kucoin = KucoinAPI(
-            api_key=os.getenv("KUCOIN_API_KEY", ""),
-            api_secret=os.getenv("KUCOIN_API_SECRET", ""),
-            passphrase=os.getenv("KUCOIN_API_PASSPHRASE", "")
-        )
+        self.kucoin = AsyncKucoinAPI()
         self.tracked_prices = {}  # {symbol: {price_data, last_update, message_id}}
         self.track_interval = 10  # Default update interval in seconds
         self.price_tracker.start()
         logger.info("Price tracker initialized")
 
     def cog_unload(self):
+        """Clean up when the cog is unloaded"""
         self.price_tracker.cancel()
         logger.info("Price tracker unloaded")
 
@@ -39,9 +41,6 @@ class PriceTracker(commands.Cog):
         
         Example: !track ETH-USDT 30
         """
-        if interval < 10:
-            await ctx.send("⚠️ Interval cannot be less than 10 seconds to avoid rate limiting")
-            interval = 10
         
         symbol = symbol.upper()
         
@@ -115,12 +114,8 @@ class PriceTracker(commands.Cog):
             await ctx.send("No symbols are currently being tracked")
             return
         
-        embed = discord.Embed(
-            title="Currently Tracked Symbols",
-            description="List of all price trackers currently active",
-            color=discord.Color.blue()
-        )
-        
+        # Create fields for the embed
+        fields = []
         for symbol, data in self.tracked_prices.items():
             # Calculate time since started
             time_elapsed = datetime.now() - data["created_at"]
@@ -131,7 +126,7 @@ class PriceTracker(commands.Cog):
             # Get latest price and calculate change since start
             current_price = float(data["price_data"]["price"])
             start_price = data["history"][0]
-            change_pct = ((current_price - start_price) / start_price) * 100
+            change_pct = ((current_price - start_price) / start_price) * 100 if start_price else 0
             
             value = (
                 f"Current: ${current_price:.2f}\n"
@@ -140,20 +135,30 @@ class PriceTracker(commands.Cog):
                 f"Running for: {time_str}"
             )
             
-            embed.add_field(name=symbol, value=value, inline=True)
+            fields.append((symbol, value, True))
+        
+        # Create the embed using utility
+        embed = create_alert_embed(
+            title="Currently Tracked Symbols",
+            description="List of all price trackers currently active",
+            fields=fields,
+            color=discord.Color.blue()
+        )
         
         await ctx.send(embed=embed)
     
     async def get_symbol_data(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get ticker data for a symbol asynchronously"""
         try:
-            # Create a separate thread for the API call since it's blocking
-            loop = asyncio.get_event_loop()
-            ticker_data = await loop.run_in_executor(None, self.kucoin.get_ticker, symbol)
+            # Use our async API client
+            ticker_data = await self.kucoin.get_ticker(symbol)
             
             if ticker_data and ticker_data.get("code") == "200000":
                 return ticker_data.get("data", {})
+            
+            logger.warning(f"Failed to get ticker data for {symbol}: {ticker_data.get('msg', 'Unknown error')}")
             return None
+            
         except Exception as e:
             logger.error(f"Error fetching data for {symbol}: {str(e)}")
             return None
@@ -181,66 +186,45 @@ class PriceTracker(commands.Cog):
             # Change since tracking started
             change_since_start = ((current_price - history[0]) / history[0]) * 100
         
-        # Create embed with color based on recent trend
+        # Prepare price data for the embed utility
+        price_data = {
+            "price": current_price,
+            "bestBid": ticker_data.get("bestBid"),
+            "bestAsk": ticker_data.get("bestAsk")
+        }
+        
+        # Add custom fields for our specific needs
+        fields = []
+        
+        fields.append(("1m Change", f"{'+' if change_1m >= 0 else ''}{change_1m:.2f}%", True))
+        fields.append(("5m Change", f"{'+' if change_5m >= 0 else ''}{change_5m:.2f}%", True))
+        
+        if len(history) > 1:
+            fields.append(("Since Start", f"{'+' if change_since_start >= 0 else ''}{change_since_start:.2f}%", True))
+        
+        # Use our utility to create the embed
         color = discord.Color.green() if change_1m >= 0 else discord.Color.red()
         
         # Format the symbol name for title
         base_currency, quote_currency = symbol.split("-")
         
-        embed = discord.Embed(
-            title=f"{base_currency}/{quote_currency} Price Tracker",
-            description=f"Live price updates for {symbol}",
-            color=color,
-            timestamp=datetime.now()
-        )
-        
-        # Add price and changes
-        embed.add_field(
-            name="Current Price",
-            value=f"${current_price:.2f}",
-            inline=True
-        )
-        
-        embed.add_field(
-            name="1m Change",
-            value=f"{'+' if change_1m >= 0 else ''}{change_1m:.2f}%",
-            inline=True
-        )
-        
-        embed.add_field(
-            name="5m Change",
-            value=f"{'+' if change_5m >= 0 else ''}{change_5m:.2f}%",
-            inline=True
-        )
-        
-        if len(history) > 1:
-            embed.add_field(
-                name="Since Start",
-                value=f"{'+' if change_since_start >= 0 else ''}{change_since_start:.2f}%",
-                inline=True
-            )
-        
-        # Add bid/ask spread if available
-        if "bestBid" in ticker_data and "bestAsk" in ticker_data:
-            best_bid = float(ticker_data["bestBid"])
-            best_ask = float(ticker_data["bestAsk"])
-            spread = ((best_ask - best_bid) / best_bid) * 100
-            
-            embed.add_field(
-                name="Bid/Ask",
-                value=f"${best_bid:.2f} / ${best_ask:.2f}",
-                inline=True
-            )
-            
-            embed.add_field(
-                name="Spread",
-                value=f"{spread:.2f}%",
-                inline=True
-            )
-        
         # Add footer with update interval
         interval = self.tracked_prices[symbol]["interval"]
-        embed.set_footer(text=f"Updates every {interval} seconds • React with ⏹️ to stop tracking")
+        footer_text = f"Updates every {interval} seconds • React with ⏹️ to stop tracking"
+        
+        # Create the embed
+        embed = create_price_embed(
+            symbol=symbol,
+            price_data=price_data,
+            title_prefix=f"{base_currency}/{quote_currency} Price Tracker",
+            show_additional_fields=True,
+            color_based_on_change=True,
+            footer_text=footer_text
+        )
+        
+        # Add our custom fields
+        for name, value, inline in fields:
+            embed.add_field(name=name, value=value, inline=inline)
         
         return embed
     
@@ -251,45 +235,56 @@ class PriceTracker(commands.Cog):
             return
         
         current_time = datetime.now()
+        update_tasks = []
         
         for symbol, data in list(self.tracked_prices.items()):
             # Check if it's time to update based on the interval
             time_diff = (current_time - data["last_update"]).total_seconds()
             
             if time_diff >= data["interval"]:
-                try:
-                    # Get updated price data
-                    updated_data = await self.get_symbol_data(symbol)
-                    
-                    if not updated_data:
-                        logger.warning(f"Failed to update price for {symbol}")
-                        continue
-                    
-                    # Update tracked data
-                    self.tracked_prices[symbol]["price_data"] = updated_data
-                    self.tracked_prices[symbol]["last_update"] = current_time
-                    
-                    # Update price history (keep last 60 entries - ~ 1 hour at 60s interval)
-                    self.tracked_prices[symbol]["history"].append(float(updated_data["price"]))
-                    if len(self.tracked_prices[symbol]["history"]) > 60:
-                        self.tracked_prices[symbol]["history"] = self.tracked_prices[symbol]["history"][-60:]
-                    
-                    # Update the message if possible
-                    try:
-                        channel = self.bot.get_channel(data["channel_id"])
-                        if channel:
-                            message = await channel.fetch_message(data["message_id"])
-                            embed = self._create_price_embed(symbol, updated_data)
-                            await message.edit(embed=embed)
-                    except Exception as e:
-                        logger.error(f"Error updating message for {symbol}: {str(e)}")
-                        # Remove tracking if message is gone
-                        if "Unknown Message" in str(e):
-                            del self.tracked_prices[symbol]
-                            logger.info(f"Removed tracking for {symbol} due to missing message")
-                
-                except Exception as e:
-                    logger.error(f"Error in price tracker for {symbol}: {str(e)}")
+                # Create a task for each symbol that needs updating
+                update_tasks.append(self.update_symbol_price(symbol, data))
+        
+        # Run all updates concurrently
+        if update_tasks:
+            await asyncio.gather(*update_tasks, return_exceptions=True)
+    
+    async def update_symbol_price(self, symbol: str, data: Dict[str, Any]):
+        """Update price data for a specific symbol"""
+        try:
+            # Get updated price data
+            updated_data = await self.get_symbol_data(symbol)
+            
+            if not updated_data:
+                logger.warning(f"Failed to update price for {symbol}")
+                return
+            
+            # Update tracked data
+            self.tracked_prices[symbol]["price_data"] = updated_data
+            self.tracked_prices[symbol]["last_update"] = datetime.now()
+            
+            # Update price history (keep last 60 entries - ~ 1 hour at 60s interval)
+            self.tracked_prices[symbol]["history"].append(float(updated_data["price"]))
+            if len(self.tracked_prices[symbol]["history"]) > 60:
+                self.tracked_prices[symbol]["history"] = self.tracked_prices[symbol]["history"][-60:]
+            
+            # Update the message if possible
+            try:
+                channel = self.bot.get_channel(data["channel_id"])
+                if channel:
+                    message = await channel.fetch_message(data["message_id"])
+                    embed = self._create_price_embed(symbol, updated_data)
+                    await message.edit(embed=embed)
+                    logger.debug(f"Updated price for {symbol}: ${float(updated_data['price']):.2f}")
+            except Exception as e:
+                logger.error(f"Error updating message for {symbol}: {str(e)}")
+                # Remove tracking if message is gone
+                if "Unknown Message" in str(e):
+                    del self.tracked_prices[symbol]
+                    logger.info(f"Removed tracking for {symbol} due to missing message")
+        
+        except Exception as e:
+            logger.error(f"Error in price tracker for {symbol}: {str(e)}")
     
     @price_tracker.before_loop
     async def before_price_tracker(self):
@@ -334,15 +329,11 @@ class PriceTracker(commands.Cog):
         
         # Handle chart/details reaction
         elif str(reaction.emoji) == "📊":
-            # Create a more detailed view with price history
+            # Get the historical data
             history = self.tracked_prices[tracked_symbol]["history"]
             
-            # Create a detailed embed
-            detailed_embed = discord.Embed(
-                title=f"{tracked_symbol} Detailed Price View",
-                color=discord.Color.blue(),
-                timestamp=datetime.now()
-            )
+            # Create fields for the detailed view
+            fields = []
             
             # Calculate some statistics
             if len(history) > 1:
@@ -351,9 +342,20 @@ class PriceTracker(commands.Cog):
                 low = min(history)
                 avg = sum(history) / len(history)
                 
-                # Calculate volatility (standard deviation)
+                # Add statistics fields
+                fields.append(("Current", f"${current:.2f}", True))
+                fields.append(("High", f"${high:.2f}", True))
+                fields.append(("Low", f"${low:.2f}", True))
+                fields.append(("Average", f"${avg:.2f}", True))
+                fields.append(("Range", f"${high-low:.2f}", True))
+                
+                # Add percentage from high/low
+                pct_from_high = ((current - high) / high) * 100
+                pct_from_low = ((current - low) / low) * 100
+                fields.append(("From High/Low", f"{pct_from_high:.2f}% / {pct_from_low:.2f}%", True))
+                
+                # Calculate volatility (standard deviation) using polars
                 if len(history) > 2:
-                    # Use polars for calculations
                     df = pl.DataFrame({"price": history})
                     volatility = df.select(pl.col("price").std()).item()
                     
@@ -362,27 +364,7 @@ class PriceTracker(commands.Cog):
                     pos_changes = sum(1 for c in changes if c > 0)
                     neg_changes = sum(1 for c in changes if c < 0)
                     
-                    detailed_embed.add_field(
-                        name="Volatility",
-                        value=f"{volatility:.2f} ({pos_changes} ↑ / {neg_changes} ↓)",
-                        inline=True
-                    )
-                
-                # Add statistics fields
-                detailed_embed.add_field(name="Current", value=f"${current:.2f}", inline=True)
-                detailed_embed.add_field(name="High", value=f"${high:.2f}", inline=True)
-                detailed_embed.add_field(name="Low", value=f"${low:.2f}", inline=True)
-                detailed_embed.add_field(name="Average", value=f"${avg:.2f}", inline=True)
-                detailed_embed.add_field(name="Range", value=f"${high-low:.2f}", inline=True)
-                
-                # Add percentage from high/low
-                pct_from_high = ((current - high) / high) * 100
-                pct_from_low = ((current - low) / low) * 100
-                detailed_embed.add_field(
-                    name="From High/Low",
-                    value=f"{pct_from_high:.2f}% / {pct_from_low:.2f}%",
-                    inline=True
-                )
+                    fields.append(("Volatility", f"{volatility:.2f} ({pos_changes} ↑ / {neg_changes} ↓)", True))
             
             # Add tracking information
             created_at = self.tracked_prices[tracked_symbol]["created_at"]
@@ -397,11 +379,7 @@ class PriceTracker(commands.Cog):
                 f"Data points: {len(history)}"
             )
             
-            detailed_embed.add_field(
-                name="Tracking Info",
-                value=tracking_info,
-                inline=False
-            )
+            fields.append(("Tracking Info", tracking_info, False))
             
             # Add numeric recent price history (last 10 points)
             if len(history) > 1:
@@ -422,17 +400,23 @@ class PriceTracker(commands.Cog):
                     
                     history_str += f"• {time_str}: ${price:.2f}{change}\n"
                 
-                detailed_embed.add_field(
-                    name="Recent Price History",
-                    value=history_str,
-                    inline=False
-                )
+                fields.append(("Recent Price History", history_str, False))
+            
+            # Create the detailed embed
+            detailed_embed = create_alert_embed(
+                title=f"{tracked_symbol} Detailed Price View",
+                description="Historical price analysis and statistics",
+                fields=fields,
+                color=discord.Color.blue(),
+                timestamp=True
+            )
             
             # Send as a new message
             await message.channel.send(embed=detailed_embed)
             
             # Remove the user's reaction
             await message.remove_reaction("📊", user)
+
 
 async def setup(bot):
     """Add the PriceTracker cog to the bot"""
