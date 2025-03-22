@@ -1,24 +1,24 @@
 """
-Manager for cryptocurrency price tracking.
-Coordinates updates, storage, and message handling.
+Tracker Manager module for managing cryptocurrency price tracking.
+Handles tracking state, updates, and message management.
 """
 
-from typing import Dict, List, Any, Optional, Tuple
-import discord
+from typing import Dict, Any, List, Optional
 import asyncio
 from datetime import datetime
+import discord
 from loguru import logger
 
-from .tracker_model import TrackedPrice
-from .tracker_storage import TrackerStorage
 from .price_service import PriceService
-from .embed_builder import EmbedBuilder
 
 
 class TrackerManager:
-    """Manager for price tracking functionality"""
+    """
+    Manager for cryptocurrency price tracking operations.
+    Maintains tracking state, handles updates, and manages Discord messages.
+    """
     
-    def __init__(self, bot: discord.ext.commands.Bot):
+    def __init__(self, bot):
         """
         Initialize the tracker manager.
         
@@ -26,173 +26,245 @@ class TrackerManager:
             bot: Discord bot instance
         """
         self.bot = bot
-        self.storage = TrackerStorage()
         self.price_service = PriceService()
-        self.embed_builder = EmbedBuilder()
-        logger.debug("Initialized TrackerManager")
+        self.tracked_prices = {}  # {symbol: {price_data, last_update, message_id, channel_id, etc.}}
+        logger.debug("TrackerManager initialized")
     
     async def start_tracking(
-        self, 
-        ctx: discord.ext.commands.Context, 
-        symbol: str, 
+        self,
+        symbol: str,
+        channel_id: int,
+        message_id: int,
         interval: int = 60
-    ) -> Optional[discord.Message]:
+    ) -> bool:
         """
-        Start tracking a cryptocurrency price.
+        Start tracking a symbol's price.
         
         Args:
-            ctx: Discord context
-            symbol: Trading pair to track
+            symbol: Trading pair symbol (e.g., "BTC-USDT")
+            channel_id: Discord channel ID for updates
+            message_id: Discord message ID to update
             interval: Update interval in seconds
             
         Returns:
-            The message object or None if failed
+            Success status
         """
-        symbol = symbol.upper()
-        
-        # Check if already tracking this symbol
-        if self.storage.get_tracked_price(symbol):
-            await ctx.send(f"Already tracking {symbol}. Use !untrack {symbol} to stop first.")
-            return None
-        
-        # Start with a processing message
-        message = await ctx.send(f"⏳ Starting price tracker for {symbol}...")
-        
         try:
             # Get initial price data
-            ticker_data = await self.price_service.get_current_price(symbol)
+            ticker_data = await self.price_service.get_symbol_data(symbol)
             
             if not ticker_data:
-                await message.edit(content=f"❌ Could not retrieve price data for {symbol}")
-                return None
+                logger.warning(f"Could not retrieve price data for {symbol}")
+                return False
             
-            # Create tracked price object
-            current_time = datetime.now()
-            tracked = TrackedPrice(
-                symbol=symbol,
-                price_data=ticker_data,
-                last_update=current_time,
-                message_id=message.id,
-                channel_id=ctx.channel.id,
-                interval=interval,
-                created_at=current_time,
-                history=[float(ticker_data.get("price", 0))]
-            )
-            
-            # Add to storage
-            self.storage.add_tracked_price(tracked)
-            
-            # Update the message with the initial data
-            embed = self.embed_builder.build_tracking_embed(tracked)
-            await message.edit(content=None, embed=embed)
-            
-            # Add control reactions
-            await message.add_reaction("⏹️")  # Stop tracking
-            await message.add_reaction("📊")  # Show chart/detailed view
+            # Store tracking info
+            self.tracked_prices[symbol] = {
+                "price_data": ticker_data,
+                "last_update": datetime.now(),
+                "message_id": message_id,
+                "channel_id": channel_id,
+                "interval": interval,
+                "history": [float(ticker_data["price"])],  # Store price history
+                "created_at": datetime.now()
+            }
             
             logger.info(f"Started tracking {symbol} with {interval}s interval")
-            return message
+            return True
             
         except Exception as e:
-            error_msg = f"❌ Error starting price tracker: {str(e)}"
-            await message.edit(content=error_msg)
-            logger.error(f"Error tracking {symbol}: {str(e)}")
-            return None
+            logger.error(f"Error starting to track {symbol}: {str(e)}")
+            return False
     
-    async def stop_tracking(self, symbol: str) -> bool:
+    def stop_tracking(self, symbol: str) -> bool:
         """
-        Stop tracking a symbol.
+        Stop tracking a symbol's price.
         
         Args:
-            symbol: Symbol to stop tracking
+            symbol: Trading pair symbol to stop tracking
             
         Returns:
-            Whether tracking was stopped successfully
+            Success status
         """
-        symbol = symbol.upper()
+        if symbol in self.tracked_prices:
+            del self.tracked_prices[symbol]
+            logger.info(f"Stopped tracking {symbol}")
+            return True
         
-        tracked = self.storage.remove_tracked_price(symbol)
-        if not tracked:
+        logger.warning(f"Cannot stop tracking {symbol}: not being tracked")
+        return False
+    
+    def get_tracked_symbols(self) -> List[str]:
+        """
+        Get list of currently tracked symbols.
+        
+        Returns:
+            List of symbols being tracked
+        """
+        return list(self.tracked_prices.keys())
+    
+    def get_tracking_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Get tracking information for a symbol.
+        
+        Args:
+            symbol: Trading pair symbol
+            
+        Returns:
+            Tracking information or None if not tracked
+        """
+        return self.tracked_prices.get(symbol)
+    
+    async def update_all_tracked_prices(self) -> Dict[str, bool]:
+        """
+        Update all tracked prices and their Discord messages.
+        
+        Returns:
+            Dictionary mapping symbols to update success status
+        """
+        if not self.tracked_prices:
+            return {}
+        
+        current_time = datetime.now()
+        update_results = {}
+        update_tasks = []
+        
+        for symbol, data in list(self.tracked_prices.items()):
+            # Check if it's time to update based on the interval
+            time_diff = (current_time - data["last_update"]).total_seconds()
+            
+            if time_diff >= data["interval"]:
+                # Create a task for each symbol that needs updating
+                task = self.update_symbol(symbol)
+                update_tasks.append(task)
+        
+        # Run all updates concurrently
+        if update_tasks:
+            results = await asyncio.gather(*update_tasks, return_exceptions=True)
+            
+            # Process results
+            for i, symbol in enumerate(self.tracked_prices.keys()):
+                if i < len(results):
+                    if isinstance(results[i], Exception):
+                        logger.error(f"Error updating {symbol}: {str(results[i])}")
+                        update_results[symbol] = False
+                    else:
+                        update_results[symbol] = results[i]
+        
+        return update_results
+    
+    async def update_symbol(self, symbol: str) -> bool:
+        """
+        Update price data for a specific symbol and its Discord message.
+        
+        Args:
+            symbol: Trading pair symbol to update
+            
+        Returns:
+            Success status
+        """
+        if symbol not in self.tracked_prices:
+            logger.warning(f"Cannot update {symbol}: not being tracked")
             return False
         
-        # Try to update the message if possible
         try:
-            channel = self.bot.get_channel(tracked.channel_id)
-            if channel:
-                message = await channel.fetch_message(tracked.message_id)
-                
-                # Create stopped embed
-                embed = self.embed_builder.build_stopped_embed(tracked)
-                await message.edit(embed=embed)
-                await message.clear_reactions()
-                
-        except Exception as e:
-            logger.error(f"Error updating message for stopped tracker {symbol}: {str(e)}")
+            # Get tracking data
+            tracking_data = self.tracked_prices[symbol]
             
-        return True
-    
-    async def update_prices(self) -> List[str]:
-        """
-        Update all prices that need updating based on their intervals.
-        
-        Returns:
-            List of symbols that were updated
-        """
-        # Get symbols that need updating
-        symbols = self.storage.get_symbols_to_update()
-        if not symbols:
-            return []
-        
-        updated = []
-        
-        # Get prices in batch for efficiency
-        price_data = await self.price_service.get_prices_batch(symbols)
-        
-        # Process each symbol
-        for symbol in symbols:
-            ticker_data = price_data.get(symbol)
-            if not ticker_data:
-                continue
+            # Get updated price data
+            updated_data = await self.price_service.get_symbol_data(symbol)
             
-            tracked = self.storage.get_tracked_price(symbol)
-            if not tracked:
-                continue
+            if not updated_data:
+                logger.warning(f"Failed to update price for {symbol}")
+                return False
             
-            # Update the tracked price
-            tracked.update_price_data(ticker_data)
-            updated.append(symbol)
+            # Update tracked data
+            self.tracked_prices[symbol]["price_data"] = updated_data
+            self.tracked_prices[symbol]["last_update"] = datetime.now()
+            
+            # Update price history (keep last 60 entries - ~ 1 hour at 60s interval)
+            price = float(updated_data["price"])
+            self.tracked_prices[symbol]["history"].append(price)
+            if len(self.tracked_prices[symbol]["history"]) > 60:
+                self.tracked_prices[symbol]["history"] = self.tracked_prices[symbol]["history"][-60:]
             
             # Update the message if possible
             try:
-                channel = self.bot.get_channel(tracked.channel_id)
+                channel = self.bot.get_channel(tracking_data["channel_id"])
                 if channel:
-                    message = await channel.fetch_message(tracked.message_id)
-                    embed = self.embed_builder.build_tracking_embed(tracked)
-                    await message.edit(embed=embed)
-                    logger.debug(f"Updated price for {symbol}: ${tracked.current_price:.2f}")
+                    message = await channel.fetch_message(tracking_data["message_id"])
+                    
+                    # Create embed content (implementation would be in the cog)
+                    # Since this is the manager, we'll return success and let the cog
+                    # handle the message update with proper formatting
+                    
+                    logger.debug(f"Updated price for {symbol}: ${price:.2f}")
+                    return True
             except Exception as e:
                 logger.error(f"Error updating message for {symbol}: {str(e)}")
                 # Remove tracking if message is gone
                 if "Unknown Message" in str(e):
-                    self.storage.remove_tracked_price(symbol)
+                    self.stop_tracking(symbol)
                     logger.info(f"Removed tracking for {symbol} due to missing message")
+                return False
         
-        return updated
+        except Exception as e:
+            logger.error(f"Error in price tracker for {symbol}: {str(e)}")
+            return False
+        
+        return True
     
-    async def show_details(self, channel: discord.TextChannel, symbol: str) -> None:
+    def get_price_statistics(self, symbol: str) -> Dict[str, Any]:
         """
-        Show detailed price statistics in a new message.
+        Get statistical information about tracked price.
         
         Args:
-            channel: Discord channel
-            symbol: Symbol to show details for
+            symbol: Trading pair symbol
+            
+        Returns:
+            Dictionary with price statistics or empty dict if not tracked
         """
-        tracked = self.storage.get_tracked_price(symbol)
-        if not tracked:
-            await channel.send(f"Not currently tracking {symbol}")
-            return
+        if symbol not in self.tracked_prices:
+            return {}
         
-        # Create detailed embed
-        embed = self.embed_builder.build_details_embed(tracked)
-        await channel.send(embed=embed)
-        logger.debug(f"Sent detailed view for {symbol}")
+        tracking_data = self.tracked_prices[symbol]
+        history = tracking_data["history"]
+        
+        if not history:
+            return {}
+        
+        # Get current price
+        current_price = float(tracking_data["price_data"]["price"])
+        
+        # Calculate price changes
+        changes = self.price_service.calculate_price_changes(current_price, history)
+        
+        # Calculate statistics
+        stats = self.price_service.calculate_statistics(history)
+        
+        # Get movement patterns
+        movements = self.price_service.categorize_movement(history)
+        
+        # Add tracking info
+        created_at = tracking_data["created_at"]
+        time_elapsed = datetime.now() - created_at
+        hours, remainder = divmod(int(time_elapsed.total_seconds()), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        # Combine all information
+        return {
+            "current_price": current_price,
+            "changes": changes,
+            "stats": stats,
+            "movements": movements,
+            "tracking_info": {
+                "started_at": created_at,
+                "elapsed": {
+                    "hours": hours,
+                    "minutes": minutes,
+                    "seconds": seconds,
+                    "total_seconds": time_elapsed.total_seconds()
+                },
+                "interval": tracking_data["interval"],
+                "data_points": len(history)
+            }
+        }

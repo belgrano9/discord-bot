@@ -1,86 +1,219 @@
 """
-Data models for cryptocurrency price tracking.
-Defines the structure of tracked prices and their properties.
+Price Service module for handling cryptocurrency price data.
+Provides a service layer for fetching and processing price information from exchanges.
 """
 
-from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, List
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+import asyncio
+from loguru import logger
+
+# Import API client
+from discord_bot.api.kucoin import AsyncKucoinAPI
 
 
-@dataclass
-class TrackedPrice:
-    """Data model for a tracked cryptocurrency price"""
-    symbol: str
-    price_data: Dict[str, Any]
-    last_update: datetime
-    message_id: int
-    channel_id: int
-    interval: int
-    created_at: datetime
-    history: List[float] = field(default_factory=list)
+class PriceService:
+    """
+    Service for fetching and processing cryptocurrency price data.
+    Handles the interaction with exchange APIs and provides methods
+    for retrieving formatted price information.
+    """
     
-    @property
-    def current_price(self) -> float:
-        """Get the current price"""
-        return float(self.price_data.get("price", 0))
+    def __init__(self):
+        """Initialize the price service with API clients"""
+        # Initialize the KuCoin API client
+        self.kucoin = AsyncKucoinAPI()
+        logger.debug("PriceService initialized")
     
-    @property
-    def starting_price(self) -> Optional[float]:
-        """Get the starting price from history"""
-        if self.history and len(self.history) > 0:
-            return self.history[0]
-        return None
-    
-    def update_price_data(self, new_data: Dict[str, Any]) -> None:
-        """Update the price data and history"""
-        self.price_data = new_data
-        self.last_update = datetime.now()
+    async def get_symbol_data(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Get ticker data for a symbol asynchronously.
         
-        # Add to price history
-        current = float(new_data.get("price", 0))
-        self.history.append(current)
-        
-        # Keep history limited to last 60 entries
-        if len(self.history) > 60:
-            self.history = self.history[-60:]
+        Args:
+            symbol: Trading pair symbol (e.g. "BTC-USDT")
+            
+        Returns:
+            Dictionary with ticker data or None if unavailable
+        """
+        try:
+            # Use our async API client to fetch ticker data
+            ticker_data = await self.kucoin.get_ticker(symbol)
+            
+            if ticker_data and ticker_data.get("code") == "200000":
+                return ticker_data.get("data", {})
+            
+            logger.warning(f"Failed to get ticker data for {symbol}: {ticker_data.get('msg', 'Unknown error')}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error fetching data for {symbol}: {str(e)}")
+            return None
     
-    def calculate_changes(self) -> Dict[str, float]:
-        """Calculate price changes for different timeframes"""
-        current = self.current_price
+    async def get_markets(self) -> List[Dict[str, Any]]:
+        """
+        Get list of available trading pairs.
+        
+        Returns:
+            List of available markets or empty list if unavailable
+        """
+        try:
+            # Get market list from KuCoin
+            markets_data = await self.kucoin.get_market_list()
+            
+            if markets_data and markets_data.get("code") == "200000":
+                return markets_data.get("data", [])
+            
+            logger.warning(f"Failed to get market list: {markets_data.get('msg', 'Unknown error')}")
+            return []
+            
+        except Exception as e:
+            logger.error(f"Error fetching market list: {str(e)}")
+            return []
+    
+    async def get_24h_stats(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Get 24-hour trading statistics for a symbol.
+        
+        Args:
+            symbol: Trading pair symbol (e.g. "BTC-USDT")
+            
+        Returns:
+            Dictionary with 24h stats or None if unavailable
+        """
+        try:
+            # Get 24h stats from KuCoin
+            stats_data = await self.kucoin.get_24h_stats(symbol)
+            
+            if stats_data and stats_data.get("code") == "200000":
+                return stats_data.get("data", {})
+            
+            logger.warning(f"Failed to get 24h stats for {symbol}: {stats_data.get('msg', 'Unknown error')}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error fetching 24h stats for {symbol}: {str(e)}")
+            return None
+    
+    def calculate_price_changes(self, current_price: float, history: List[float]) -> Dict[str, float]:
+        """
+        Calculate price changes over different time periods.
+        
+        Args:
+            current_price: Current price value
+            history: List of historical price points (oldest first)
+            
+        Returns:
+            Dictionary with calculated changes
+        """
         changes = {
             "change_1m": 0.0,
             "change_5m": 0.0,
+            "change_15m": 0.0,
             "change_since_start": 0.0
         }
         
-        if len(self.history) > 1:
-            # 1-minute change (or whatever the interval represents)
-            if len(self.history) > 1:
-                changes["change_1m"] = ((current - self.history[-2]) / self.history[-2]) * 100
-            
-            # 5-minute change
-            if len(self.history) > 5:
-                changes["change_5m"] = ((current - self.history[-6]) / self.history[-6]) * 100
-            
-            # Change since tracking started
-            start_price = self.history[0]
-            changes["change_since_start"] = ((current - start_price) / start_price) * 100
-            
+        if not history or len(history) < 2:
+            return changes
+        
+        # Calculate changes for different timeframes
+        if len(history) > 1:  # 1-minute change (or last interval)
+            changes["change_1m"] = ((current_price - history[-2]) / history[-2]) * 100
+        
+        if len(history) > 5:  # 5-minute change (or 5 intervals)
+            changes["change_5m"] = ((current_price - history[-6]) / history[-6]) * 100
+        
+        if len(history) > 15:  # 15-minute change (or 15 intervals)
+            changes["change_15m"] = ((current_price - history[-16]) / history[-16]) * 100
+        
+        # Change since tracking started
+        changes["change_since_start"] = ((current_price - history[0]) / history[0]) * 100
+        
         return changes
     
-    def calculate_stats(self) -> Dict[str, float]:
-        """Calculate statistics based on price history"""
-        stats = {}
+    def calculate_statistics(self, history: List[float]) -> Dict[str, float]:
+        """
+        Calculate statistical metrics for price history.
         
-        if len(self.history) > 1:
-            stats["high"] = max(self.history)
-            stats["low"] = min(self.history)
-            stats["avg"] = sum(self.history) / len(self.history)
-            stats["range"] = stats["high"] - stats["low"]
+        Args:
+            history: List of price history points
             
-            # Percentage from high/low
-            stats["pct_from_high"] = ((self.current_price - stats["high"]) / stats["high"]) * 100
-            stats["pct_from_low"] = ((self.current_price - stats["low"]) / stats["low"]) * 100
+        Returns:
+            Dictionary with statistical values
+        """
+        if not history:
+            return {
+                "high": 0.0,
+                "low": 0.0,
+                "avg": 0.0,
+                "range": 0.0,
+                "volatility": 0.0
+            }
+        
+        # Basic statistics
+        high = max(history)
+        low = min(history)
+        avg = sum(history) / len(history)
+        price_range = high - low
+        
+        # Calculate volatility (standard deviation)
+        if len(history) > 1:
+            # Calculate mean
+            mean = sum(history) / len(history)
+            # Calculate sum of squared differences from mean
+            sq_diff_sum = sum((x - mean) ** 2 for x in history)
+            # Calculate variance and then standard deviation
+            variance = sq_diff_sum / len(history)
+            volatility = variance ** 0.5
+        else:
+            volatility = 0.0
+        
+        return {
+            "high": high,
+            "low": low,
+            "avg": avg,
+            "range": price_range,
+            "volatility": volatility
+        }
+    
+    def format_price_change(self, change: float) -> str:
+        """
+        Format a price change with sign and percentage.
+        
+        Args:
+            change: Price change percentage
             
-        return stats
+        Returns:
+            Formatted string with sign and percentage
+        """
+        sign = "+" if change >= 0 else ""
+        return f"{sign}{change:.2f}%"
+    
+    def categorize_movement(self, history: List[float]) -> Dict[str, int]:
+        """
+        Categorize price movements as up, down, or sideways.
+        
+        Args:
+            history: List of price history points
+            
+        Returns:
+            Dictionary with counts of different movement types
+        """
+        if len(history) < 2:
+            return {"up": 0, "down": 0, "sideways": 0}
+        
+        # Calculate consecutive price changes
+        changes = []
+        for i in range(1, len(history)):
+            change_pct = ((history[i] - history[i-1]) / history[i-1]) * 100
+            changes.append(change_pct)
+        
+        # Count movement types
+        up_moves = sum(1 for c in changes if c > 0.1)  # More than 0.1% up
+        down_moves = sum(1 for c in changes if c < -0.1)  # More than 0.1% down
+        sideways_moves = sum(1 for c in changes if -0.1 <= c <= 0.1)  # Between -0.1% and 0.1%
+        
+        return {
+            "up": up_moves,
+            "down": down_moves,
+            "sideways": sideways_moves
+        }
