@@ -8,7 +8,9 @@ import uuid
 from typing import Dict, Any
 from urllib.parse import urlencode
 import requests
-from logging_setup import get_logger
+
+
+from discord_bot.logging_setup import get_logger
 
 logger = get_logger("stock_commands")
 
@@ -1252,12 +1254,12 @@ if __name__ == '__main__':
     
     print("Balance is:")
     print(balance["data"]["assets"])
-    print("\n Limit BUY")
-    buy = kucoin_api.add_margin_order_v1("BTC-USDT", side = "buy", order_type="limit", size=0.00004, price=10000, margin_model="isolated")
-    print(buy)
-    print("\n Cancel order:")
-    #sell = kucoin_api.add_margin_order("BTC-USDT", side = "sell",order_type="market", is_isolated=True, auto_borrow=True, size=0.00001)
-    #print(sell)
+    
+    #buy = kucoin_api.add_margin_order_v1("BTC-USDT", side = "sell", order_type="market", funds="1", margin_model="isolated")
+    #print(buy)
+    
+    sell = kucoin_api.add_margin_order("BTC-USDT", side = "sell",order_type="market", is_isolated=True, auto_borrow=True, size=0.00001, remark="Bot test short without funds")
+    print(sell)
 
     #buy = kucoin_api.add_margin_order("BTC-USDT", side = "buy", order_type="limit", size=0.00004, price =10000, is_isolated=True, remark ="Bot")
     #print(buy)

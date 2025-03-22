@@ -11,7 +11,7 @@ import hmac
 import json
 import time
 import uuid
-from typing import Dict, Any, Tuple
+from typing import Any, Tuple
 from loguru import logger
 import asyncio
 from .base import AsyncBaseAPI, require_api_key, ApiKeyRequiredError
@@ -73,7 +73,7 @@ class AsyncKucoinClient(AsyncBaseAPI):
         hm = hmac.new(key, plain, hashlib.sha256)
         return base64.b64encode(hm.digest()).decode()
     
-    def get_auth_headers(self, payload: str) -> Dict[str, str]:
+    def get_auth_headers(self, payload: str) -> dict[str, str]:
         """
         Generate headers required for KuCoin API authentication.
         
@@ -81,7 +81,7 @@ class AsyncKucoinClient(AsyncBaseAPI):
             payload: String containing method + endpoint + body
             
         Returns:
-            Dictionary of headers for API authentication
+            dictionary of headers for API authentication
         """
         timestamp = str(int(time.time() * 1000))
         signature = self.sign(
@@ -101,9 +101,9 @@ class AsyncKucoinClient(AsyncBaseAPI):
         self,
         method: str,
         endpoint: str,
-        params: Dict[str, Any] = None,
-        data: Dict[str, Any] = None
-    ) -> Dict[str, Any]:
+        params: dict[str, Any] = None,
+        data: dict[str, Any] = None
+    ) -> dict[str, Any]:
         """
         Make an authenticated request to the KuCoin API.
         
@@ -148,8 +148,8 @@ class AsyncKucoinClient(AsyncBaseAPI):
     async def public_request(
         self,
         endpoint: str,
-        params: Dict[str, Any] = None
-    ) -> Dict[str, Any]:
+        params: dict[str, Any] = None
+    ) -> dict[str, Any]:
         """
         Make a public request to the KuCoin API (no authentication required).
         
@@ -201,7 +201,7 @@ class AsyncKucoinAPI:
     
     async def _process_response(
         self,
-        response: Dict[str, Any],
+        response: dict[str, Any],
         error_key: str = "msg"
     ) -> Tuple[bool, Any, str]:
         """
@@ -231,7 +231,7 @@ class AsyncKucoinAPI:
     # MARKET DATA API #
     ###################
     
-    async def get_ticker(self, symbol: str = "BTC-USDT") -> Dict[str, Any]:
+    async def get_ticker(self, symbol: str = "BTC-USDT") -> dict[str, Any]:
         """
         Get level 1 orderbook data (ticker) for a symbol.
         
@@ -253,7 +253,7 @@ class AsyncKucoinAPI:
         
         return {"code": "200000", "data": data}
     
-    async def get_market_list(self) -> Dict[str, Any]:
+    async def get_market_list(self) -> dict[str, Any]:
         """
         Get list of available trading pairs.
         
@@ -271,7 +271,7 @@ class AsyncKucoinAPI:
         
         return {"code": "200000", "data": data}
     
-    async def get_24h_stats(self, symbol: str = "BTC-USDT") -> Dict[str, Any]:
+    async def get_24h_stats(self, symbol: str = "BTC-USDT") -> dict[str, Any]:
         """
         Get 24-hour statistics for a symbol.
         
@@ -298,7 +298,7 @@ class AsyncKucoinAPI:
     ###################
     
     @require_api_key
-    async def get_trade_fees(self, symbols: str = "BTC-USDT") -> Dict[str, Any]:
+    async def get_trade_fees(self, symbols: str = "BTC-USDT") -> dict[str, Any]:
         """
         Get trade fees for specific symbols.
         
@@ -306,7 +306,7 @@ class AsyncKucoinAPI:
             symbols: Comma-separated trading pair symbols (e.g., "BTC-USDT,ETH-USDT")
             
         Returns:
-            Dictionary containing fee information for the requested symbols
+            dictionary containing fee information for the requested symbols
         """
         response = await self.client.authenticated_request(
             method="GET",
@@ -330,7 +330,7 @@ class AsyncKucoinAPI:
         self,
         currency: str = None,
         account_type: str = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get list of accounts with optional filtering.
         
@@ -360,6 +360,29 @@ class AsyncKucoinAPI:
         
         return {"code": "200000", "data": data}
     
+    @require_api_key
+    async def get_deposit_address(self, currency: str) -> dict[str, Any]:
+        """
+        Get deposit address for a specific currency.
+        
+        Args:
+            currency: Currency code (e.g., 'BTC', 'ETH')
+                
+        Returns:
+            Deposit address information
+        """
+        response = await self.client.authenticated_request(
+            method="GET",
+            endpoint="/api/v1/deposit-addresses",
+            params={"currency": currency}
+        )
+        
+        success, data, error = await self._process_response(response)
+        if not success:
+            logger.warning(f"Failed to get deposit address for {currency}: {error}")
+            return {"code": response.get("code", "999999"), "msg": error}
+        
+        return {"code": "200000", "data": data}
     ###################
     # MARGIN API      #
     ###################
@@ -370,7 +393,7 @@ class AsyncKucoinAPI:
         symbol: str = None,
         quote_currency: str = "USDT",
         query_type: str = "ISOLATED"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get isolated margin account information.
         
@@ -421,7 +444,7 @@ class AsyncKucoinAPI:
         auto_borrow: bool = False,
         auto_repay: bool = False,
         time_in_force: str = "GTC"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Place an order in the margin trading system (cross or isolated).
         
@@ -490,7 +513,7 @@ class AsyncKucoinAPI:
         return {"code": "200000", "data": api_data}
     
     @require_api_key
-    async def cancel_order_by_id(self, order_id: str) -> Dict[str, Any]:
+    async def cancel_order_by_id(self, order_id: str) -> dict[str, Any]:
         """
         Cancel a single order by its order ID.
         
@@ -528,7 +551,7 @@ class AsyncKucoinAPI:
         trade_type: str = "TRADE",
         limit: int = None,
         current_page: int = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get the recent fills (order execution history).
         
@@ -625,10 +648,10 @@ class KucoinAPI:
         self,
         method: str,
         endpoint: str,
-        params: Dict[str, Any] = None,
-        data: Dict[str, Any] = None,
+        params: dict[str, Any] = None,
+        data: dict[str, Any] = None,
         auth_required: bool = True
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Legacy method to make a HTTP request to the KuCoin API.
         Now uses the async version internally.
@@ -680,11 +703,11 @@ class KucoinAPI:
     
     # Implement all the legacy methods using the async versions
     
-    def get_ticker(self, symbol: str = "BTC-USDT") -> Dict[str, Any]:
+    def get_ticker(self, symbol: str = "BTC-USDT") -> dict[str, Any]:
         """Get ticker information for a symbol"""
         return self._run_async(self.async_api.get_ticker(symbol))
     
-    def get_trade_fees(self, symbols: str = "BTC-USDT") -> Dict[str, Any]:
+    def get_trade_fees(self, symbols: str = "BTC-USDT") -> dict[str, Any]:
         """Get trade fees for specific symbols"""
         return self._run_async(self.async_api.get_trade_fees(symbols))
     
@@ -693,7 +716,7 @@ class KucoinAPI:
         symbol: str = None,
         quote_currency: str = "USDT",
         query_type: str = "ISOLATED"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get isolated margin account information"""
         return self._run_async(
             self.async_api.get_isolated_margin_accounts(
@@ -714,7 +737,7 @@ class KucoinAPI:
         auto_borrow: bool = False,
         auto_repay: bool = False,
         time_in_force: str = "GTC"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Place an order in the margin trading system"""
         return self._run_async(
             self.async_api.add_margin_order(
@@ -732,7 +755,7 @@ class KucoinAPI:
             )
         )
     
-    def cancel_order_by_id(self, order_id: str) -> Dict[str, Any]:
+    def cancel_order_by_id(self, order_id: str) -> dict[str, Any]:
         """Cancel a single order by its order ID"""
         return self._run_async(self.async_api.cancel_order_by_id(order_id))
     
@@ -747,7 +770,7 @@ class KucoinAPI:
         trade_type: str = "TRADE",
         limit: int = None,
         current_page: int = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get the recent fills (order execution history)"""
         return self._run_async(
             self.async_api.get_filled_list(

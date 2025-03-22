@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 from api.kucoin import AsyncKucoinAPI
 import uuid

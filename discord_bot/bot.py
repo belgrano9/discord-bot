@@ -5,12 +5,12 @@ from logging_setup import get_logger
 
 # Import the setup functions
 from stock_commands import setup as setup_stock_commands
-from stock_alerts import setup as setup_stock_alerts
+
 from portfolio_tracker import setup as setup_portfolio_tracker
 from scheduled_reports import ScheduledReports
 from trading_commands import setup as setup_trading_commands
-from price_tracker import setup as setup_price_tracker 
-
+from price_tracker import setup as setup_price_tracker
+from alerts import setup as setup_stock_alerts
 # Create module logger
 logger = get_logger("bot")
 
