@@ -229,6 +229,138 @@ class OrderCommands:
             # Register with reaction handler
             self.reaction_handler.register_message(message.id, order_response.order_id)
 
+    async def handle_full_order(
+    self,
+    ctx: commands.Context,
+    market: Optional[str] = None,
+    side: Optional[str] = None,
+    amount: Optional[str] = None,
+    price_or_type: Optional[str] = None,
+    order_type: str = "limit",
+    auto_borrow: bool = False
+) -> None:
+        """
+        Handle the real order command.
+        
+        Args:
+            ctx: Discord context
+            market: Trading pair
+            side: Buy or sell
+            amount: Amount to trade
+            price_or_type: Price for limit orders or "market" for market orders
+            order_type: Type of order (limit, market, funds)
+            auto_borrow: Whether to enable auto-borrowing (for short selling)
+        """
+        # Security measure: Check if user has the correct role
+        required_role = discord.utils.get(ctx.guild.roles, name="Trading-Authorized")
+        if required_role is None or required_role not in ctx.author.roles:
+            await ctx.send("⛔ You don't have permission to place real orders. You need the 'Trading-Authorized' role.")
+            return
+        
+        # If no parameters were provided, collect them interactively
+        if not all([market, side, amount]):
+            order_request = await self.input_manager.collect_trade_parameters(ctx, is_real=True)
+            if not order_request:
+                return
+        else:
+            # Process provided parameters
+            try:
+                # Process side
+                side = side.lower()
+                if side not in ["buy", "sell"]:
+                    await ctx.send("❌ Invalid side. Must be 'buy' or 'sell'.")
+                    return
+                
+                side_enum = OrderSide.BUY if side == "buy" else OrderSide.SELL
+                
+                # Check if using funds for market order
+                use_funds = False
+                if order_type.lower() == "funds":
+                    use_funds = True
+                    order_type = "market"
+                
+                # Check if price_or_type indicates market order
+                if price_or_type and price_or_type.lower() == "market":
+                    order_type_enum = OrderType.MARKET
+                    price = None
+                else:
+                    if order_type.lower() == "market":
+                        order_type_enum = OrderType.MARKET
+                        price = None
+                    else:
+                        order_type_enum = OrderType.LIMIT
+                        # For limit orders, price_or_type is the price
+                        try:
+                            price = float(price_or_type) if price_or_type else None
+                            if price is not None and price <= 0:
+                                await ctx.send("❌ Price must be positive.")
+                                return
+                        except ValueError:
+                            await ctx.send("❌ Invalid price. Must be a number.")
+                            return
+                
+                # Validate amount
+                try:
+                    amount_float = float(amount)
+                    if amount_float <= 0:
+                        await ctx.send("❌ Amount must be positive.")
+                        return
+                except ValueError:
+                    await ctx.send("❌ Invalid amount. Must be a number.")
+                    return
+                
+                # For market orders with no price specified, get current price for display
+                if order_type_enum == OrderType.MARKET and price is None:
+                    # Get current price for display purposes
+                    try:
+                        ticker_data = await self.market_service.get_ticker(market)
+                        if ticker_data:
+                            price = float(ticker_data.get("price", 0))
+                    except:
+                        pass
+                
+                # Create the order request
+                order_request = OrderRequest(
+                    symbol=market.upper(),
+                    side=side_enum,
+                    order_type=order_type_enum,
+                    amount=amount_float,
+                    price=price,
+                    use_funds=use_funds,
+                    auto_borrow=auto_borrow,  # Use the parameter
+                    is_isolated=True  # Always use isolated margin
+                )
+            except Exception as e:
+                await ctx.send(f"❌ Error processing order parameters: {str(e)}")
+                return
+        
+        # Get confirmation before proceeding
+        confirmed = await self.input_manager.confirm_action(
+            ctx,
+            title="⚠️ WARNING: REAL ORDER REQUEST ⚠️",
+            description="You are about to place an order using REAL funds. Are you sure you want to proceed?",
+            color=discord.Color.red(),
+            use_reactions=True
+        )
+        
+        if not confirmed:
+            await ctx.send("🛑 Order creation cancelled.")
+            return
+        
+        # Process the order
+        order_response = await self.kucoin_service.place_full_order(ctx, order_request)
+        
+        # Create the embed
+        embed = self.order_formatter.format_order_response(order_response, order_request)
+        
+        # Send the message
+        message = await ctx.send(embed=embed)
+        
+        # Add clipboard reaction if we have an order ID
+        if order_response.order_id:
+            await message.add_reaction("📋")
+            # Register with reaction handler
+            self.reaction_handler.register_message(message.id, order_response.order_id)
 
     async def handle_stop_order(
         self,

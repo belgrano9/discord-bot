@@ -6,6 +6,7 @@ Handles interaction with KuCoin API for orders and account data.
 import uuid
 from typing import Dict, List, Any, Optional, Tuple
 from loguru import logger
+from discord.ext import commands
 
 from api.kucoin import AsyncKucoinAPI
 from ..models.order import OrderRequest, OrderResponse, OrderSide, OrderType
@@ -19,8 +20,7 @@ class KuCoinService:
         """Initialize the KuCoin service"""
         self.api = AsyncKucoinAPI()
         logger.debug("Initialized KuCoinService")
-    
-    
+            
     async def place_order(self, order: OrderRequest) -> OrderResponse:
         """
         Place an order on KuCoin.
@@ -99,6 +99,116 @@ class KuCoinService:
                 order_data = response.get("data", {})
                 # Log success
                 logger.info(f"Order placed successfully! Order ID: {order_data.get('orderId')}")
+                return OrderResponse(
+                    success=True,
+                    order_id=order_data.get("orderId"),
+                    client_oid=order_data.get("clientOid"),
+                    order_data=order_data
+                )
+            else:
+                # Handle error response
+                error_msg = response.get("msg", "Unknown error")
+                logger.error(f"Order placement failed: {error_msg}")
+                return OrderResponse(
+                    success=False,
+                    error_message=error_msg
+                )
+                
+        except Exception as e:
+            logger.error(f"Error placing order: {str(e)}")
+            return OrderResponse(
+                success=False,
+                error_message=f"Error placing order: {str(e)}"
+            )
+        
+
+    async def place_full_order(self, ctx: commands.Context, order: OrderRequest) -> OrderResponse:
+        """
+        Place an order on KuCoin.
+        
+        Args:
+            order: Order request data
+            
+        Returns:
+            Order response with result
+        """
+        try:
+            # Generate client_oid if not provided
+            if not order.client_oid:
+                order.client_oid = str(uuid.uuid4())
+                
+            # Validate the order
+            is_valid, error = order.validate()
+            if not is_valid:
+                return OrderResponse(
+                    success=False,
+                    error_message=error
+                )
+            
+            # Log the order request
+            logger.info(f"Placing {order.order_type.value} {order.side.value} order for {order.symbol}: {order.amount} @ {order.price if order.price else 'market price'}")
+            
+            # Use v3 API only for borrowing/short selling
+            # Use v1 API for all normal orders (buying and selling existing assets)
+            if order.auto_borrow:
+                logger.debug(f"Using v3 API for borrowing/short selling")
+                # Use v3 API for borrowing (short selling)
+                if order.order_type == OrderType.LIMIT:
+                    # Limit order
+                    response = await self.api.add_margin_order(
+                        symbol=order.symbol,
+                        side=order.side.value,
+                        client_oid=order.client_oid,
+                        order_type=order.order_type.value,
+                        price=str(order.price),
+                        size=str(order.amount),
+                        is_isolated=order.is_isolated,
+                        auto_borrow=order.auto_borrow,
+                        auto_repay=order.auto_repay,
+                        time_in_force=order.time_in_force
+                    )
+                else:  # market order
+                    response = await self.api.add_margin_order(
+                        symbol=order.symbol,
+                        side=order.side.value,
+                        client_oid=order.client_oid,
+                        order_type=order.order_type.value,
+                        size=str(order.amount),  # Use amount as size
+                        is_isolated=order.is_isolated,
+                        auto_borrow=order.auto_borrow,
+                        auto_repay=order.auto_repay
+                    )
+            else:
+                logger.debug(f"Using v1 API for normal {order.side.value} order")
+                # Use v1 API for normal buying and selling
+                response = await self.api.add_margin_order_v1(
+                    symbol=order.symbol,
+                    side=order.side.value,
+                    client_oid=order.client_oid,
+                    order_type=order.order_type.value,
+                    price=str(order.price) if order.price else None,
+                    size=str(order.amount) if not order.use_funds else None,
+                    funds=str(order.amount) if order.use_funds else None,
+                    margin_model="isolated" if order.is_isolated else "cross",
+                    auto_borrow=order.auto_borrow,
+                    auto_repay=order.auto_repay,
+                    time_in_force=order.time_in_force
+                )
+                        
+            # Check if the order was successful
+            if response.get("code") == "200000":
+                order_data = response.get("data", {})
+                # Log success
+                logger.info(f"Order placed successfully! Order ID: {order_data.get('orderId')}")
+                
+                # Automatically trigger inspect_last_trade command
+                try:
+                    await ctx.bot.command_prefix + "inspect_last_trade", order.symbol)
+
+                    logger.info(f"Triggered trade inspection for {order.symbol}")
+                except Exception as e:
+                    logger.error(f"Failed to trigger trade inspection: {str(e)}")
+
                 return OrderResponse(
                     success=True,
                     order_id=order_data.get("orderId"),
