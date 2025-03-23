@@ -535,6 +535,274 @@ class AsyncKucoinAPI:
         
         return {"code": "200000", "data": data}
     
+    @require_api_key
+    async def add_margin_order_v1(
+    self,
+    symbol: str,
+    side: str,
+    client_oid: str = None,
+    order_type: str = "limit",
+    price: str = None,
+    size: str = None,
+    funds: str = None,
+    margin_model: str = "cross",
+    auto_borrow: bool = False,
+    auto_repay: bool = False,
+    stp: str = None,
+    time_in_force: str = "GTC",
+    cancel_after: int = None,
+    post_only: bool = False,
+    hidden: bool = False,
+    iceberg: bool = False,
+    visible_size: str = None,
+    remark: str = None
+) -> dict[str, Any]:
+        """
+        Place an order in the margin trading system (v1 endpoint).
+        
+        Note: This endpoint must be used for selling actual assets in isolated margin.
+        There's a known issue where selling actual assets fails with v3 endpoint
+        (add_margin_order), which should only be used for borrowing/shorting.
+
+        Args:
+            symbol: Trading pair symbol (e.g., ETH-BTC)
+            side: 'buy' or 'sell'
+            client_oid: Client-generated order ID (recommend to use UUID)
+            order_type: Order type - 'limit' or 'market'
+            price: Price for limit orders
+            size: Quantity to buy/sell
+            funds: Funds to use (for market orders, alternative to size)
+            margin_model: 'cross' (cross mode) or 'isolated' (isolated mode)
+            auto_borrow: Whether to auto-borrow if insufficient balance
+            auto_repay: Whether to auto-repay when closing position
+            stp: Self-trade prevention strategy - 'CN', 'CO', 'CB', or 'DC'
+            time_in_force: Order timing strategy - 'GTC', 'GTT', 'IOC', 'FOK'
+            cancel_after: Cancel after n seconds (for GTT orders)
+            post_only: Whether the order is post-only
+            hidden: Whether the order is hidden
+            iceberg: Whether the order is an iceberg order
+            visible_size: Maximum visible quantity for iceberg orders
+            remark: Order remarks
+            
+        Returns:
+            Dictionary containing orderId, possibly borrowSize and loanApplyId
+        """
+        # Prepare order data
+        data = {
+            "symbol": symbol,
+            "side": side,
+            "clientOid": client_oid or str(uuid.uuid4()),
+        }
+        
+        # Add order type if specified
+        if order_type:
+            data["type"] = order_type
+        
+        # Add margin model
+        if margin_model:
+            data["marginModel"] = margin_model
+        
+        # Add auto-borrow and auto-repay flags
+        if auto_borrow:
+            data["autoBorrow"] = auto_borrow
+        if auto_repay:
+            data["autoRepay"] = auto_repay
+        
+        # Add STP if specified
+        if stp:
+            data["stp"] = stp
+        
+        # Add remark if specified
+        if remark:
+            data["remark"] = remark
+        
+        # Add parameters based on order type
+        if order_type == "limit":
+            if price is None:
+                raise ValueError("Price is required for limit orders")
+            if size is None:
+                raise ValueError("Size is required for limit orders")
+            
+            data["price"] = str(price)
+            data["size"] = str(size)
+            
+            # Add optional parameters for limit orders
+            if time_in_force:
+                data["timeInForce"] = time_in_force
+            
+            if cancel_after and time_in_force == "GTT":
+                data["cancelAfter"] = cancel_after
+            
+            if post_only:
+                data["postOnly"] = post_only
+            
+            if hidden:
+                data["hidden"] = hidden
+            
+            if iceberg:
+                data["iceberg"] = iceberg
+                if visible_size:
+                    data["visibleSize"] = str(visible_size)
+        
+        elif order_type == "market":
+            # For market orders, either size or funds must be provided
+            if size is not None:
+                data["size"] = str(size)
+            elif funds is not None:
+                data["funds"] = str(funds)
+            else:
+                raise ValueError("Either size or funds must be provided for market orders")
+        
+        # Make the API request (using authenticated_request for async)
+        response = await self.client.authenticated_request(
+            method="POST",
+            endpoint="/api/v1/margin/order",
+            data=data
+        )
+        
+        success, api_data, error = await self._process_response(response)
+        if not success:
+            logger.warning(f"Failed to place margin order (v1): {error}")
+            return {"code": response.get("code", "999999"), "msg": error}
+        
+        return {"code": "200000", "data": api_data}
+
+    @require_api_key
+    async def add_stop_order(
+        self,
+        symbol: str,
+        side: str,
+        stop_price: str,
+        stop_type: str = "loss",
+        order_type: str = "limit",
+        price: str = None,
+        size: str = None,
+        funds: str = None,
+        client_oid: str = None,
+        time_in_force: str = "GTC",
+        cancel_after: int = None,
+        post_only: bool = False,
+        hidden: bool = False,
+        iceberg: bool = False,
+        visible_size: str = None,
+        remark: str = None,
+        stp: str = None,
+        trade_type: str = "TRADE"
+    ) -> dict[str, Any]:
+        """
+        Place a stop order to the Spot/Margin trading system.
+        The maximum untriggered stop orders for a single trading pair in one account is 20.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., BTC-USDT)
+            side: 'buy' or 'sell'
+            stop_price: The trigger price
+            stop_type: 'loss' or 'entry' (default: 'loss')
+            order_type: Order type - 'limit' or 'market' (default: 'limit')
+            price: Price for limit orders
+            size: Quantity to buy/sell
+            funds: Funds to use (alternative to size for market orders)
+            client_oid: Client-generated order ID (recommend to use UUID)
+            time_in_force: Time in force strategy - 'GTC', 'GTT', 'IOC', 'FOK' (default: 'GTC')
+            cancel_after: Cancel after n seconds, only for GTT orders
+            post_only: Whether the order is post-only (default: False)
+            hidden: Whether the order is hidden (default: False)
+            iceberg: Whether the order is an iceberg order (default: False)
+            visible_size: Maximum visible quantity for iceberg orders
+            remark: Order remarks, max 100 characters
+            stp: Self-trade prevention strategy - 'CN', 'CO', 'CB', or 'DC'
+            trade_type: Type of trading - 'TRADE' (Spot), 'MARGIN_TRADE' (Cross Margin),
+                        'MARGIN_ISOLATED_TRADE' (Isolated Margin) (default: 'TRADE')
+        
+        Returns:
+            Dictionary containing the order ID
+        """
+        # Validate required parameters
+        if not symbol or not side or not stop_price:
+            raise ValueError("Symbol, side, and stop_price are required parameters")
+        
+        if side not in ["buy", "sell"]:
+            raise ValueError("Side must be either 'buy' or 'sell'")
+        
+        if stop_type not in ["loss", "entry"]:
+            raise ValueError("Stop type must be either 'loss' or 'entry'")
+        
+        if order_type not in ["limit", "market"]:
+            raise ValueError("Order type must be either 'limit' or 'market'")
+        
+        # Validate parameters based on order type
+        if order_type == "limit" and price is None:
+            raise ValueError("Price is required for limit orders")
+        
+        if order_type == "limit" and size is None:
+            raise ValueError("Size is required for limit orders")
+        
+        if order_type == "market" and size is None and funds is None:
+            raise ValueError("Either size or funds must be provided for market orders")
+        
+        # Prepare order data
+        data = {
+            "symbol": symbol,
+            "side": side,
+            "stopPrice": stop_price,
+            "stop": stop_type,
+            "type": order_type,
+            "clientOid": client_oid or str(uuid.uuid4())
+        }
+        
+        # Add price for limit orders
+        if order_type == "limit" and price is not None:
+            data["price"] = price
+        
+        # Add size if provided
+        if size is not None:
+            data["size"] = size
+        
+        # Add funds if provided (for market orders)
+        if funds is not None and order_type == "market":
+            data["funds"] = funds
+        
+        # Add optional parameters if specified
+        if time_in_force:
+            data["timeInForce"] = time_in_force
+        
+        if cancel_after is not None:
+            data["cancelAfter"] = cancel_after
+        
+        if post_only:
+            data["postOnly"] = post_only
+        
+        if hidden:
+            data["hidden"] = hidden
+        
+        if iceberg:
+            data["iceberg"] = iceberg
+            if visible_size:
+                data["visibleSize"] = visible_size
+        
+        if remark:
+            data["remark"] = remark
+        
+        if stp:
+            data["stp"] = stp
+        
+        if trade_type:
+            data["tradeType"] = trade_type
+        
+        # Make the API request
+        response = await self.client.authenticated_request(
+            method="POST",
+            endpoint="/api/v1/stop-order",
+            data=data
+        )
+        
+        success, api_data, error = await self._process_response(response)
+        if not success:
+            logger.warning(f"Failed to place stop order: {error}")
+            return {"code": response.get("code", "999999"), "msg": error}
+        
+        return {"code": "200000", "data": api_data}
+
     ###################
     # TRADE HISTORY   #
     ###################

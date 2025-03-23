@@ -15,6 +15,7 @@ from stocks import setup as setup_stock_commands
 from portfolio import setup as setup_portfolio_tracker
 from reports import setup as setup_scheduled_reports
 from trading import setup as setup_trading_commands
+from trade_inspector import setup as setup_trade_inspector
 
 # Create module logger
 logger = get_logger("bot")
@@ -83,6 +84,14 @@ async def on_ready():
         logger.info("Trading commands loaded!")
     except Exception as e:
         logger.error(f"Error loading trading commands: {e}")
+
+    # 7. Load trade inspector (no dependencies)
+    try:
+        await setup_trade_inspector(bot)
+        logger.info("Trade inspector loaded!")
+    except Exception as e:
+        logger.error(f"Error loading trading commands: {e}")
+
 
 
 @bot.command(name="ping")

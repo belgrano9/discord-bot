@@ -1255,20 +1255,35 @@ if __name__ == '__main__':
     print("Balance is:")
     print(balance["data"]["assets"])
     
-    #buy = kucoin_api.add_margin_order_v1("BTC-USDT", side = "sell", order_type="market", funds="1", margin_model="isolated")
-    #print(buy)
+
+    # SIMPLE ORDERS
+    ## SELL 
+    ### IF I DO HAVE FUNDS USE V1:
     
-    sell = kucoin_api.add_margin_order("BTC-USDT", side = "sell",order_type="market", is_isolated=True, auto_borrow=True, size=0.00001, remark="Bot test short without funds")
+    #sell = kucoin_api.add_margin_order_v1("BTC-USDT", side = "sell", size=0.0004 ,order_type="market", margin_model="isolated")
+    #print(sell)
+    
+    ### IF I DON'T HAVE FUNDS, I NEED TO BORROW. USE V3: 
+    sell = kucoin_api.add_margin_order("BTC-USDT", side = "sell",order_type="market", is_isolated=True, auto_borrow=True, size=0.0001 , remark="Bot test short with funds")
     print(sell)
 
+    ## BUY
+    ### V3 DOESN'T WORK
     #buy = kucoin_api.add_margin_order("BTC-USDT", side = "buy", order_type="limit", size=0.00004, price =10000, is_isolated=True, remark ="Bot")
     #print(buy)
     
-    #stop = kucoin_api.add_stop_order("BTC-USDT", side = "buy", order_type="market", stop_price="79555",funds="1", trade_type="MARGIN_ISOLATED_TRADE", remark="bot test stop order buy")
+    ### USE V1:
+    #buy = kucoin_api.add_margin_order_v1("BTC-USDT", side = "buy", funds=1 ,order_type="market", margin_model="isolated")
+    #print(buy)
+
+    # ADVANCED ORDER
+    ## I HAVE BOUGHT 
+
+    #stop = kucoin_api.add_stop_order("BTC-USDT", side = "sell", order_type="market", stop_price=85260, funds=1 ,trade_type="MARGIN_ISOLATED_TRADE", remark="bot test stop order buy")
     #print(stop)
 
-    open=kucoin_api.get_recent_orders()
-    print(open)
+    #open=kucoin_api.get_recent_orders()
+    #print(open)
 
     #id=buy["data"]["orderId"]
     #cancel = kucoin_api.cancel_order_by_id(order_id=id)

@@ -62,21 +62,55 @@ class TradingCommands(commands.Cog):
         side: Optional[str] = None, 
         amount: Optional[str] = None, 
         price_or_type: Optional[str] = None, 
-        order_type: str = "limit"
+        order_type: str = "limit",
+        auto_borrow: bool = False
     ):
         """
         Create a real order on KuCoin with direct parameters
         
-        Usage: !realorder <market> <side> <amount> [price_or_type] [order_type]
+        Usage: !realorder <market> <side> <amount> [price_or_type] [order_type] [auto_borrow]
         
         Examples:
         !realorder BTC-USDT buy 0.001 50000         (limit order to buy 0.001 BTC at $50000)
         !realorder BTC-USDT sell 0.001 market       (market order to sell 0.001 BTC)
-        !realorder ETH-USDT buy 0.05 2000           (limit order to buy 0.05 ETH at $2000)
-        !realorder ETH-USDT sell 0.05 market        (market order to sell 0.05 ETH)
+        !realorder BTC-USDT buy 0.05 2000           (limit order to buy 0.05 BTC at $2000)
+        !realorder BTC-USDT sell 0.05 market        (market order to sell 0.05 BTC)
         !realorder BTC-USDT buy 100 market funds    (market order to buy $100 worth of BTC)
+        !realorder BTC-USDT sell 0.001 market True  (short sell with auto-borrowing)
         """
-        await self.order_commands.handle_real_order(ctx, market, side, amount, price_or_type, order_type)
+        await self.order_commands.handle_real_order(ctx, market, side, amount, price_or_type, order_type, auto_borrow)
+
+    @commands.command(name="stoporder")
+    async def stop_order(
+        self, 
+        ctx, 
+        market: Optional[str] = None, 
+        side: Optional[str] = None, 
+        stop_price: Optional[str] = None, 
+        stop_type: str = "loss",
+        order_type: str = "limit", 
+        price_or_size: Optional[str] = None,
+        size_or_funds: Optional[str] = None
+    ):
+        """
+        Create a stop order on KuCoin
+        
+        Parameters:
+        market: Trading pair (e.g., BTC-USDT)
+        side: buy or sell
+        stop_price: Trigger price
+        stop_type: Type of stop order - 'loss' or 'entry' (default: 'loss')
+        order_type: Type of order (market or limit, default is limit)
+        price_or_size: Price for limit orders, or size for market orders
+        size_or_funds: Size for limit orders, 'funds' keyword for market buy
+        
+        Examples:
+        !stoporder BTC-USDT sell 60000 loss limit 59500 0.001  (Sell 0.001 BTC at $59,500 if price reaches $60,000)
+        !stoporder BTC-USDT buy 20000 entry market 0.001      (Buy 0.001 BTC at market price if price rises to $20,000)
+        !stoporder BTC-USDT buy 20000 loss market 100 funds    (Buy $100 worth of BTC at market price if price drops to $20,000)
+        """
+        await self.order_commands.handle_stop_order(ctx, market, side, stop_price, stop_type, order_type, price_or_size, size_or_funds)
+
 
     @commands.command(name="ticker")
     async def get_ticker(self, ctx, symbol: str = "BTC-USDT"):
