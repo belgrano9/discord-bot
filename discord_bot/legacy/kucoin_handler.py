@@ -1237,7 +1237,11 @@ class KucoinAPI:
             params=params
         )
 
-    
+    def get_order_details(self, order_id:str):
+        return self._make_request(
+            method="GET",
+            endpoint=f"/api/v1/orders/{order_id}",
+        )
 
 
 if __name__ == '__main__':
@@ -1248,13 +1252,20 @@ if __name__ == '__main__':
     secret = os.getenv("KUCOIN_API_SECRET", "")
     passphrase = os.getenv("KUCOIN_API_PASSPHRASE", "")
     
+
     kucoin_api = KucoinAPI(key, secret, passphrase)
     
+
+    stats = kucoin_api.get_24h_stats()
+    print(stats)
     balance = kucoin_api.get_isolated_margin_accounts(symbol="BTC-USDT",quote_currency="USDT")
     
     print("Balance is:")
     print(balance["data"]["assets"])
     
+    # CHECK OPEN ORDERS
+    #act = kucoin_api.get_order_details()
+    #print(act)
 
     # SIMPLE ORDERS
     ## SELL 
@@ -1264,8 +1275,8 @@ if __name__ == '__main__':
     #print(sell)
     
     ### IF I DON'T HAVE FUNDS, I NEED TO BORROW. USE V3: 
-    sell = kucoin_api.add_margin_order("BTC-USDT", side = "sell",order_type="market", is_isolated=True, auto_borrow=True, size=0.0001 , remark="Bot test short with funds")
-    print(sell)
+    #sell = kucoin_api.add_margin_order("BTC-USDT", side = "sell",order_type="market", is_isolated=True, auto_borrow=True, size=0.0001 , remark="Bot test short with funds")
+    #print(sell)
 
     ## BUY
     ### V3 DOESN'T WORK

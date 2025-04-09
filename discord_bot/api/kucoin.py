@@ -11,7 +11,7 @@ import hmac
 import json
 import time
 import uuid
-from typing import Any, Tuple
+from typing import Any, Tuple, Optional
 from loguru import logger
 import asyncio
 from .base import AsyncBaseAPI, require_api_key, ApiKeyRequiredError
@@ -536,6 +536,51 @@ class AsyncKucoinAPI:
         return {"code": "200000", "data": data}
     
     @require_api_key
+    async def cancel_all_margin_orders(
+        self,
+        symbol: str,
+        trade_type: str = "MARGIN_ISOLATED_TRADE"
+    ) -> dict[str, Any]:
+        """
+        Cancel all open margin orders for a specific symbol.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., BTC-USDT)
+            trade_type: Type of margin trading:
+                        "MARGIN_TRADE" - cross margin trading
+                        "MARGIN_ISOLATED_TRADE" - isolated margin trading (default)
+            
+        Returns:
+            Dictionary containing the cancellation result
+        """
+        # Validate trade type
+        valid_trade_types = ["MARGIN_TRADE", "MARGIN_ISOLATED_TRADE"]
+        if trade_type not in valid_trade_types:
+            logger.warning(f"Invalid trade_type: {trade_type}. Must be one of {valid_trade_types}")
+            return {"code": "400000", "msg": f"Invalid trade_type. Must be one of {valid_trade_types}"}
+        
+        # Prepare query parameters
+        params = {
+            "symbol": symbol,
+            "tradeType": trade_type
+        }
+        
+        # Make the request
+        response = await self.client.authenticated_request(
+            method="DELETE",
+            endpoint="/api/v3/hf/margin/orders",
+            params=params
+        )
+        
+        success, data, error = await self._process_response(response)
+        if not success:
+            logger.warning(f"Failed to cancel all {trade_type} orders for {symbol}: {error}")
+            return {"code": response.get("code", "999999"), "msg": error}
+        
+        return {"code": "200000", "data": data}
+
+
+    @require_api_key
     async def add_margin_order_v1(
     self,
     symbol: str,
@@ -874,6 +919,61 @@ class AsyncKucoinAPI:
         
         return {"code": "200000", "data": data}
 
+    @require_api_key
+    async def get_stop_orders(
+    self,
+    symbol: str,
+    status: str = "active",
+    side: Optional[str] = None,
+    type: Optional[str] = None,
+    trade_type: str = "MARGIN_ISOLATED_TRADE",
+    start_at: Optional[int] = None,
+    end_at: Optional[int] = None,
+    page_size: int = 50,
+    current_page: int = 1
+) -> dict[str, Any]:
+        """
+        Get stop orders list with pagination.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., "BTC-USDT")
+            status: Order status - "active" or "done" (default: "active")
+            side: Filter by side - "buy" or "sell"
+            type: Filter by type - "limit" or "market"
+            trade_type: Type of trading - "TRADE", "MARGIN_TRADE", "MARGIN_ISOLATED_TRADE"
+            start_at: Start time in milliseconds
+            end_at: End time in milliseconds
+            page_size: Number of results per page (default: 50)
+            current_page: Current page (default: 1)
+            
+        Returns:
+            Dictionary containing stop order data
+        """
+        # Prepare query parameters
+        params = {
+            "symbol": symbol,
+            "status": status,
+            "tradeType": trade_type,
+            "pageSize": page_size,
+            "currentPage": current_page
+        }
+        
+        # Add optional parameters if provided
+        if side:
+            params["side"] = side
+        if type:
+            params["type"] = type
+        if start_at:
+            params["startAt"] = start_at
+        if end_at:
+            params["endAt"] = end_at
+        
+        # Make the API request
+        return await self.client.authenticated_request(
+            method="GET",
+            endpoint="/api/v1/stop-order",
+            params=params
+        )
 
 # Backward compatibility wrapper for the original KucoinAPI
 class KucoinAPI:

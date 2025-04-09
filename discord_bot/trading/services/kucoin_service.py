@@ -7,6 +7,7 @@ import uuid
 from typing import Dict, List, Any, Optional, Tuple
 from loguru import logger
 from discord.ext import commands
+import asyncio
 
 from api.kucoin import AsyncKucoinAPI
 from ..models.order import OrderRequest, OrderResponse, OrderSide, OrderType
@@ -121,12 +122,12 @@ class KuCoinService:
                 error_message=f"Error placing order: {str(e)}"
             )
         
-
     async def place_full_order(self, ctx: commands.Context, order: OrderRequest) -> OrderResponse:
         """
-        Place an order on KuCoin.
+        Place an order on KuCoin and set up stop orders with monitoring.
         
         Args:
+            ctx: Discord context
             order: Order request data
             
         Returns:
@@ -148,8 +149,7 @@ class KuCoinService:
             # Log the order request
             logger.info(f"Placing {order.order_type.value} {order.side.value} order for {order.symbol}: {order.amount} @ {order.price if order.price else 'market price'}")
             
-            # Use v3 API only for borrowing/short selling
-            # Use v1 API for all normal orders (buying and selling existing assets)
+            # Use appropriate API endpoint based on order type
             if order.auto_borrow:
                 logger.debug(f"Using v3 API for borrowing/short selling")
                 # Use v3 API for borrowing (short selling)
@@ -201,14 +201,22 @@ class KuCoinService:
                 # Log success
                 logger.info(f"Order placed successfully! Order ID: {order_data.get('orderId')}")
                 
-                # Automatically trigger inspect_last_trade command
+                # Wait for the trade to be processed in the system
+                await asyncio.sleep(2)  # Add a 2-second delay
+                
+                # Get the TradeInspector cog and call inspect_last_trade
                 try:
-                    await ctx.bot.command_prefix + "inspect_last_trade", order.symbol)
-
-                    logger.info(f"Triggered trade inspection for {order.symbol}")
+                    trade_inspector = ctx.bot.get_cog("TradeInspector")
+                    if trade_inspector:
+                        # This will place and monitor stop orders
+                        await trade_inspector.inspect_last_trade(ctx, order.symbol)
+                        logger.info(f"Triggered trade inspection for {order.symbol}")
+                    else:
+                        logger.warning("TradeInspector cog not found")
                 except Exception as e:
                     logger.error(f"Failed to trigger trade inspection: {str(e)}")
 
+                # Return the original order response
                 return OrderResponse(
                     success=True,
                     order_id=order_data.get("orderId"),
