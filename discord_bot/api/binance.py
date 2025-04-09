@@ -298,8 +298,6 @@ class AsyncBinanceAPI:
     # ORDER API       #
     ###################
     
-
-    # Updated method in AsyncBinanceAPI class
     @require_api_key
     async def create_margin_order(
         self,
@@ -312,18 +310,20 @@ class AsyncBinanceAPI:
         time_in_force: Optional[str] = None,
         is_isolated: bool = False,
         quote_order_qty: Optional[float] = None,
-        new_client_order_id: Optional[str] = None
+        new_client_order_id: Optional[str] = None,
+        side_effect_type: str = "NO_SIDE_EFFECT"
     ) -> Dict[str, Any]:
         """Create a new margin order."""
         params = {
             "symbol": symbol,
             "side": side,
-            "type": order_type
+            "type": order_type,
+            "sideEffectType": side_effect_type
         }
         
-        # Add timeInForce only for limit orders
-        if order_type == "LIMIT" and time_in_force:
-            params["timeInForce"] = time_in_force
+        # Add timeInForce for limit orders (default to GTC)
+        if order_type == "LIMIT":
+            params["timeInForce"] = time_in_force or "GTC"
         
         # Add quantity or quoteOrderQty (but not both)
         if quantity is not None:
@@ -331,13 +331,13 @@ class AsyncBinanceAPI:
         elif quote_order_qty is not None:
             params["quoteOrderQty"] = f"{quote_order_qty}"
         
-        # Add price for limit orders
+        # Add price for limit orders, formatted to 2 decimal places
         if price is not None:
-            params["price"] = f"{price}"
+            params["price"] = f"{price:.2f}"
         
         # Add stopPrice for stop orders
         if stop_price is not None:
-            params["stopPrice"] = f"{stop_price}"
+            params["stopPrice"] = f"{stop_price:.2f}"
         
         # Add isolated margin flag
         if is_isolated:
@@ -352,6 +352,7 @@ class AsyncBinanceAPI:
             endpoint="/sapi/v1/margin/order",
             params=params
         )
+        
 
     @require_api_key
     async def cancel_margin_order(
