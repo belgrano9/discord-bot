@@ -8,7 +8,7 @@ from discord.ext import commands
 from typing import Optional
 from loguru import logger
 
-from ..services.kucoin_service import KuCoinService
+from ..services.binance_service import BinanceService
 from ..formatters.account_formatter import AccountFormatter
 
 
@@ -17,11 +17,11 @@ class AccountCommands:
     
     def __init__(self):
         """Initialize account commands"""
-        self.kucoin_service = KuCoinService()
+        self.binance_service = BinanceService()
         self.account_formatter = AccountFormatter()
         logger.debug("Initialized AccountCommands")
     
-    async def handle_balance(self, ctx: commands.Context, symbol: str = "BTC-USDT") -> None:
+    async def handle_balance(self, ctx: commands.Context, symbol: str = "BTCUSDT") -> None:
         """
         Handle the balance command.
         
@@ -35,12 +35,15 @@ class AccountCommands:
             await ctx.send("⛔ You don't have permission to view balance information. You need the 'Trading-Authorized' role.")
             return
         
+        # Normalize symbol for Binance (uppercase, no dash)
+        symbol = symbol.upper().replace("-", "")
+        
         # Show processing message
         processing_message = await ctx.send(f"⏳ Retrieving isolated margin account information for {symbol}...")
         
         try:
             # Get the margin account information
-            account = await self.kucoin_service.get_margin_account(symbol)
+            account = await self.binance_service.get_margin_account(symbol)
             
             if not account:
                 await processing_message.edit(content=f"No isolated margin account data found for {symbol}.")
@@ -56,7 +59,7 @@ class AccountCommands:
             # Handle any exceptions
             await processing_message.edit(content=f"❌ Error retrieving account information: {str(e)}")
     
-    async def handle_last_trade(self, ctx: commands.Context, symbol: str = "BTC-USDT") -> None:
+    async def handle_last_trade(self, ctx: commands.Context, symbol: str = "BTCUSDT") -> None:
         """
         Handle the last trade command.
         
@@ -65,8 +68,11 @@ class AccountCommands:
             symbol: Trading pair symbol
         """
         try:
+            # Normalize symbol for Binance (uppercase, no dash)
+            symbol = symbol.upper().replace("-", "")
+            
             # Get recent trades and take the most recent
-            trades = await self.kucoin_service.get_recent_trades(symbol, limit=1)
+            trades = await self.binance_service.get_recent_trades(symbol, limit=1)
             
             if not trades:
                 await ctx.send(f"No recent trades found for {symbol}.")
@@ -100,19 +106,23 @@ class AccountCommands:
         
         Args:
             ctx: Discord context
-            symbol: Trading pair symbol (optional)
+            symbol: Trading pair symbol (required for Binance)
             limit: Maximum number of trades to show
         """
         try:
-            # Normalize symbol if provided
-            if symbol:
-                symbol = symbol.upper()
+            # For Binance we need a symbol
+            if not symbol:
+                await ctx.send("❌ Symbol is required for listing trades on Binance. Example: !list_trades BTCUSDC")
+                return
+                
+            # Normalize symbol
+            symbol = symbol.upper().replace("-", "")
             
             # Cap limit to avoid excessive data
             limit = min(limit, 100)
             
             # Get the trade history
-            trades = await self.kucoin_service.get_recent_trades(symbol, limit)
+            trades = await self.binance_service.get_recent_trades(symbol, limit)
             
             # Create the embed
             embed = self.account_formatter.format_trade_list(trades, symbol, limit)

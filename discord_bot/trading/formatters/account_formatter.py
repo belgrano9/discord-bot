@@ -27,7 +27,7 @@ class AccountFormatter:
         # Create embed
         embed = discord.Embed(
             title=f"🏦 {account.symbol} Isolated Margin Account",
-            description="Your KuCoin isolated margin account information",
+            description="Your Binance isolated margin account information",
             color=discord.Color.blue(),
             timestamp=datetime.now()
         )
@@ -38,7 +38,7 @@ class AccountFormatter:
         
         debt_ratio_pct = account.debt_ratio * 100
         embed.add_field(
-            name="Debt Ratio",
+            name="Margin Ratio",
             value=f"{account.risk_color} {debt_ratio_pct:.2f}%",
             inline=True
         )
@@ -57,12 +57,6 @@ class AccountFormatter:
                 
             if base_asset.interest > 0:
                 base_info.append(f"Interest: {base_asset.interest:.8f}")
-                
-            borrow_status = "Enabled" if base_asset.borrow_enabled else "Disabled"
-            base_info.append(f"Borrowing: {borrow_status}")
-            
-            repay_status = "Enabled" if base_asset.repay_enabled else "Disabled"
-            base_info.append(f"Repayment: {repay_status}")
             
             embed.add_field(
                 name=f"{base_currency} (Base Asset)",
@@ -84,12 +78,6 @@ class AccountFormatter:
                 
             if quote_asset.interest > 0:
                 quote_info.append(f"Interest: {quote_asset.interest:.2f}")
-                
-            borrow_status = "Enabled" if quote_asset.borrow_enabled else "Disabled"
-            quote_info.append(f"Borrowing: {borrow_status}")
-            
-            repay_status = "Enabled" if quote_asset.repay_enabled else "Disabled"
-            quote_info.append(f"Repayment: {repay_status}")
             
             embed.add_field(
                 name=f"{quote_currency} (Quote Asset)",
@@ -99,14 +87,22 @@ class AccountFormatter:
             
         # Add portfolio summary
         embed.add_field(
-            name="Total Assets (Quote Currency)",
+            name="Total Assets",
             value=f"${account.total_assets:.2f}",
             inline=True
         )
         
         embed.add_field(
-            name="Total Liabilities (Quote Currency)",
+            name="Total Liabilities",
             value=f"${account.total_liabilities:.2f}",
+            inline=True
+        )
+        
+        # Add net asset value (specific to Binance)
+        net_value = account.total_assets - account.total_liabilities
+        embed.add_field(
+            name="Net Asset Value",
+            value=f"${net_value:.2f}",
             inline=True
         )
         
@@ -129,10 +125,19 @@ class AccountFormatter:
         Returns:
             Formatted Discord embed
         """
+        # Format symbol for display
+        display_symbol = symbol
+        if symbol and len(symbol) >= 6:
+            for quote in ["USDT", "USDC", "BUSD", "BTC", "ETH", "BNB"]:
+                if symbol.endswith(quote):
+                    base = symbol[:-len(quote)]
+                    display_symbol = f"{base}/{quote}"
+                    break
+                    
         # Create title with filters info
         title = f"Isolated Margin Trades"
-        if symbol:
-            title += f" for {symbol}"
+        if display_symbol:
+            title += f" for {display_symbol}"
             
         # Create embed
         embed = discord.Embed(
@@ -163,7 +168,9 @@ class AccountFormatter:
                 break
                 
             # Create field title with trade number and symbol
-            field_title = f"Trade #{i+1}: {trade.symbol}"
+            field_title = f"Trade #{i+1}"
+            if trade.symbol:
+                field_title += f": {trade.symbol}"
             
             # Format trade details
             details = []
@@ -215,10 +222,19 @@ class AccountFormatter:
         side_emoji = "🟢" if side == "buy" else "🔴" if side == "sell" else "⚪"
         color = discord.Color.green() if side == "buy" else discord.Color.red()
         
+        # Format symbol for display
+        display_symbol = trade.symbol
+        if trade.symbol and len(trade.symbol) >= 6:
+            for quote in ["USDT", "USDC", "BUSD", "BTC", "ETH", "BNB"]:
+                if trade.symbol.endswith(quote):
+                    base = trade.symbol[:-len(quote)]
+                    display_symbol = f"{base}/{quote}"
+                    break
+        
         # Create embed
         embed = discord.Embed(
-            title=f"{side_emoji} Last {trade.symbol} Trade: {side.upper()}",
-            description=f"Trade details for {trade.symbol}",
+            title=f"{side_emoji} Last {display_symbol} Trade: {side.upper()}",
+            description=f"Trade details for {display_symbol}",
             color=color,
             timestamp=datetime.now()
         )

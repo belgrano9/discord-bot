@@ -19,6 +19,10 @@ class OrderType(str, Enum):
     """Order type (market/limit)"""
     MARKET = "market"
     LIMIT = "limit"
+    STOP_LOSS = "stop_loss"
+    STOP_LOSS_LIMIT = "stop_loss_limit"
+    TAKE_PROFIT = "take_profit"
+    TAKE_PROFIT_LIMIT = "take_profit_limit"
 
 
 @dataclass
@@ -35,6 +39,7 @@ class OrderRequest:
     auto_repay: bool = False
     use_funds: bool = False  # If True, amount is interpreted as funds rather than size
     time_in_force: str = "GTC"  # Good Till Canceled
+    stop_price: Optional[float] = None  # For stop orders
     
     def validate(self) -> tuple[bool, str]:
         """
@@ -43,8 +48,8 @@ class OrderRequest:
         Returns:
             Tuple of (is_valid, error_message)
         """
-        if not self.symbol or not "-" in self.symbol:
-            return False, "Invalid symbol format. Must be in format BASE-QUOTE (e.g., BTC-USDT)"
+        if not self.symbol:
+            return False, "Symbol is required"
             
         if self.amount <= 0:
             return False, "Amount must be positive"
@@ -54,6 +59,18 @@ class OrderRequest:
             
         if self.order_type == OrderType.LIMIT and self.price <= 0:
             return False, "Price must be positive for limit orders"
+            
+        # Validate stop orders
+        if self.order_type in [OrderType.STOP_LOSS, OrderType.STOP_LOSS_LIMIT, 
+                              OrderType.TAKE_PROFIT, OrderType.TAKE_PROFIT_LIMIT]:
+            if self.stop_price is None:
+                return False, "Stop price is required for stop orders"
+            
+            if self.stop_price <= 0:
+                return False, "Stop price must be positive"
+                
+            if "LIMIT" in self.order_type.value and self.price is None:
+                return False, "Price is required for limit stop orders"
             
         return True, ""
 

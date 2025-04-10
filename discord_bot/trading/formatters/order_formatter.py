@@ -42,12 +42,25 @@ class OrderFormatter:
         # Create the order data dictionary
         order_data = {
             "orderId": order_response.order_id,
-            "clientOid": order_response.client_oid,
+            "clientOrderId": order_response.client_oid,
         }
         
         # Add fields from order_request if available
         if order_request:
-            order_data["symbol"] = order_request.symbol
+            # Convert symbol format to display with a / instead of nothing
+            symbol = order_request.symbol
+            if len(symbol) >= 6:  # Most symbols like BTCUSDT
+                # Try to identify the base and quote currency
+                for quote in ["USDT", "USDC", "BUSD", "BTC", "ETH", "BNB"]:
+                    if symbol.endswith(quote):
+                        base = symbol[:-len(quote)]
+                        order_data["symbol"] = f"{base}/{quote}"
+                        break
+                else:
+                    order_data["symbol"] = symbol
+            else:
+                order_data["symbol"] = symbol
+                
             order_data["side"] = order_request.side.value
             order_data["type"] = order_request.order_type.value
             
@@ -60,7 +73,19 @@ class OrderFormatter:
                 order_data["size"] = order_request.amount
                 
         # Add any additional data from the response
-        order_data.update(order_response.order_data)
+        if order_response.order_data:
+            # Binance specific mappings
+            binance_mappings = {
+                "executedQty": "filled",
+                "origQty": "size",
+                "cummulativeQuoteQty": "funds",
+                "price": "price",
+                "type": "type"
+            }
+            
+            for binance_key, our_key in binance_mappings.items():
+                if binance_key in order_response.order_data:
+                    order_data[our_key] = order_response.order_data[binance_key]
         
         # Create embed
         embed = create_order_embed(
@@ -97,9 +122,19 @@ class OrderFormatter:
         Returns:
             Formatted Discord embed
         """
+        # Convert symbol format for display
+        symbol = order_request.symbol
+        display_symbol = symbol
+        if len(symbol) >= 6:
+            for quote in ["USDT", "USDC", "BUSD", "BTC", "ETH", "BNB"]:
+                if symbol.endswith(quote):
+                    base = symbol[:-len(quote)]
+                    display_symbol = f"{base}/{quote}"
+                    break
+        
         # Create order data dictionary
         order_data = {
-            "symbol": order_request.symbol,
+            "symbol": display_symbol,
             "side": order_request.side.value,
             "type": order_request.order_type.value,
             "orderId": test_order_id,

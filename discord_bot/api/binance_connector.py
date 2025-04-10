@@ -405,7 +405,8 @@ class AsyncBinanceConnectorAPI:
         time_in_force: Optional[str] = None,
         is_isolated: bool = False,
         quote_order_qty: Optional[float] = None,
-        new_client_order_id: Optional[str] = None
+        new_client_order_id: Optional[str] = None,
+        side_effect_type: str = "NO_SIDE_EFFECT"
     ) -> Dict[str, Any]:
         """
         Create a new margin order.
@@ -414,13 +415,14 @@ class AsyncBinanceConnectorAPI:
             symbol: Trading pair symbol (e.g., BTCUSDT)
             side: BUY or SELL
             order_type: LIMIT, MARKET, STOP_LOSS, etc.
-            quantity: Quantity to trade
+            quantity: Quantity to trade (will be rounded to 5 decimals)
             price: Order price (required for limit orders)
             stop_price: Stop price (for stop orders)
             time_in_force: GTC, IOC, FOK
             is_isolated: Whether to use isolated margin
             quote_order_qty: Quote quantity (for market orders)
             new_client_order_id: Client order ID
+            side_effect_type: NO_SIDE_EFFECT, MARGIN_BUY, AUTO_REPAY, etc.
             
         Returns:
             Order response
@@ -428,26 +430,37 @@ class AsyncBinanceConnectorAPI:
         params = {
             "symbol": symbol,
             "side": side,
-            "type": order_type
+            "type": order_type,
+            "sideEffectType": side_effect_type
         }
         
         # Add timeInForce only for limit orders
         if order_type == "LIMIT" and time_in_force:
             params["timeInForce"] = time_in_force
         
-        # Add quantity or quoteOrderQty (but not both)
+        # Round quantity to 5 decimal places if provided
         if quantity is not None:
-            params["quantity"] = f"{quantity}"
+            quantity = round(quantity, 5)
+            params["quantity"] = f"{quantity:.5f}"
         elif quote_order_qty is not None:
-            params["quoteOrderQty"] = f"{quote_order_qty}"
+            # Ensure minimum order value of $10
+            if quote_order_qty < 10:
+                return {"error": True, "msg": "Minimum order value is $10"}
+            params["quoteOrderQty"] = f"{quote_order_qty:.2f}"
         
         # Add price for limit orders
         if price is not None:
-            params["price"] = f"{price}"
+            params["price"] = f"{price:.2f}"
         
         # Add stopPrice for stop orders
         if stop_price is not None:
-            params["stopPrice"] = f"{stop_price}"
+            params["stopPrice"] = f"{stop_price:.2f}"
+            
+            # Validate stop price is within 10% of current price
+            if price is not None:
+                diff_percent = abs((stop_price - price) / price) * 100
+                if diff_percent > 10:
+                    return {"error": True, "msg": "Stop price must be within 10% of the current price"}
         
         # Add isolated margin flag
         if is_isolated:
@@ -566,6 +579,77 @@ class AsyncBinanceConnectorAPI:
         return {"code": "200000", "data": data}
 
 
+
+    @require_api_key
+    async def create_stop_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,  # "STOP_LOSS", "STOP_LOSS_LIMIT", "TAKE_PROFIT", "TAKE_PROFIT_LIMIT"
+        quantity: float,
+        stop_price: float,
+        price: Optional[float] = None,  # Required for LIMIT versions
+        time_in_force: Optional[str] = "GTC",
+        is_isolated: bool = False,
+        new_client_order_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a stop loss or take profit order.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., BTCUSDT)
+            side: BUY or SELL
+            order_type: STOP_LOSS, STOP_LOSS_LIMIT, TAKE_PROFIT, or TAKE_PROFIT_LIMIT
+            quantity: Quantity to trade (will be rounded to 5 decimals)
+            stop_price: Trigger price for the stop order
+            price: Limit price (required for LIMIT versions of stop orders)
+            time_in_force: GTC, IOC, FOK (default: GTC)
+            is_isolated: Whether to use isolated margin
+            new_client_order_id: Client order ID
+            
+        Returns:
+            Order response
+        """
+        # Validate order type
+        valid_types = ["STOP_LOSS", "STOP_LOSS_LIMIT", "TAKE_PROFIT", "TAKE_PROFIT_LIMIT"]
+        if order_type not in valid_types:
+            return {"error": True, "msg": f"Invalid order type. Must be one of {valid_types}"}
+        
+        # Round quantity to 5 decimal places
+        quantity = round(quantity, 5)
+        
+        # Prepare parameters
+        params = {
+            "symbol": symbol,
+            "side": side,
+            "type": order_type,
+            "quantity": f"{quantity:.5f}",
+            "stopPrice": f"{stop_price:.2f}"
+        }
+        
+        # Add price for limit orders
+        if "LIMIT" in order_type and price is not None:
+            params["price"] = f"{price:.2f}"
+            params["timeInForce"] = time_in_force
+        
+        # Add isolated margin flag
+        if is_isolated:
+            params["isIsolated"] = "TRUE"
+        
+        # Add client order ID if provided
+        if new_client_order_id:
+            params["newClientOrderId"] = new_client_order_id
+        
+        # Make the request
+        response = await self.client._run_client_method('new_margin_order', **params)
+        success, data, error = await self._process_response(response)
+        
+        if not success:
+            logger.warning(f"Failed to create stop order: {error}")
+            return {"error": True, "msg": error}
+            
+        return {"code": "200000", "data": data}
+
 class BinanceConnectorAPI:
     """
     Backward compatibility wrapper for the AsyncBinanceConnectorAPI.
@@ -650,3 +734,7 @@ class BinanceConnectorAPI:
     def cancel_order(self, **kwargs) -> Dict[str, Any]:
         """Cancel an existing order"""
         return self._run_async(self.async_api.cancel_order(**kwargs))
+    
+    def create_stop_order(self, **kwargs) -> Dict[str, Any]:
+        """Create a stop loss or take profit order"""
+        return self._run_async(self.async_api.create_stop_order(**kwargs))

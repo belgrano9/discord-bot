@@ -9,16 +9,19 @@ api_secret = os.getenv("BINANCE_API_SECRET", "")
 client = Client(api_key=api_key, api_secret=api_secret)
 
 #print(client.account()) # works
-print(client.my_trades("BTCUSDC", limit=2)) # works but empty
+#print(client.margin_my_trades("BTCUSDT")) # works but empty
 
-params = {
-    "symbol": "BTCUSDT",
-    "side": "BUY",
-    "type": "LIMIT",
-    "timeInForce": "GTC",
-    "quantity": 0.001,
-    "price": 49500,
-}
+order = client.new_margin_order(
+    symbol="BTCUSDC",
+    side="SELL",
+    type="LIMIT",
+    quantity=0.0004,
+    price="150000",
+    timeInForce="GTC",
+    sideEffectType = "AUTO_BORROW_REPAY"
+    )
+
+print(order)
 
 #new_test_order = client.new_order_test(**params) # no error
-print(client.get_order_rate_limit())
+#print(client.get_order_rate_limit())
