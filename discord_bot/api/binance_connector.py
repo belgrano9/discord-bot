@@ -448,9 +448,9 @@ class AsyncBinanceConnectorAPI:
                 return {"error": True, "msg": "Minimum order value is $10"}
             params["quoteOrderQty"] = f"{quote_order_qty:.2f}"
         
-        # Add price for limit orders
         if price is not None:
-            params["price"] = f"{price:.2f}"
+            # Convert to float first if it's a string, then format
+            params["price"] = f"{float(price):.2f}" if isinstance(price, str) else f"{price:.2f}"
         
         # Add stopPrice for stop orders
         if stop_price is not None:
@@ -470,6 +470,10 @@ class AsyncBinanceConnectorAPI:
         if new_client_order_id:
             params["newClientOrderId"] = new_client_order_id
         
+        
+        logger.info(f"Attempting 'new_margin_order' via bot with params: {params}")
+
+
         response = await self.client._run_client_method('new_margin_order', **params)
         success, data, error = await self._process_response(response)
         
@@ -585,13 +589,14 @@ class AsyncBinanceConnectorAPI:
         self,
         symbol: str,
         side: str,
-        order_type: str,  # "STOP_LOSS", "STOP_LOSS_LIMIT", "TAKE_PROFIT", "TAKE_PROFIT_LIMIT"
+        order_type: str, # STOP_LOSS, STOP_LOSS_LIMIT, TAKE_PROFIT, TAKE_PROFIT_LIMIT
         quantity: float,
         stop_price: float,
-        price: Optional[float] = None,  # Required for LIMIT versions
-        time_in_force: Optional[str] = "GTC",
+        price: Optional[float] = None,
+        time_in_force: Optional[str] = "GTC", # Already had this
         is_isolated: bool = False,
-        new_client_order_id: Optional[str] = None
+        new_client_order_id: Optional[str] = None,
+        side_effect_type: str = "NO_SIDE_EFFECT" # <-- ADD THIS parameter
     ) -> Dict[str, Any]:
         """
         Create a stop loss or take profit order.
@@ -615,32 +620,27 @@ class AsyncBinanceConnectorAPI:
         if order_type not in valid_types:
             return {"error": True, "msg": f"Invalid order type. Must be one of {valid_types}"}
         
-        # Round quantity to 5 decimal places
         quantity = round(quantity, 5)
-        
-        # Prepare parameters
+
         params = {
             "symbol": symbol,
             "side": side,
             "type": order_type,
             "quantity": f"{quantity:.5f}",
-            "stopPrice": f"{stop_price:.2f}"
+            "stopPrice": f"{stop_price:.2f}", # Assuming 2 decimals for price
+            "sideEffectType": side_effect_type # <-- USE IT HERE
         }
-        
-        # Add price for limit orders
+
         if "LIMIT" in order_type and price is not None:
             params["price"] = f"{price:.2f}"
             params["timeInForce"] = time_in_force
-        
-        # Add isolated margin flag
         if is_isolated:
             params["isIsolated"] = "TRUE"
-        
-        # Add client order ID if provided
         if new_client_order_id:
             params["newClientOrderId"] = new_client_order_id
-        
-        # Make the request
+
+        # Log before calling
+        logger.info(f"Attempting 'new_margin_order' (for stop order) with params: {params}")
         response = await self.client._run_client_method('new_margin_order', **params)
         success, data, error = await self._process_response(response)
         
@@ -650,91 +650,5 @@ class AsyncBinanceConnectorAPI:
             
         return {"code": "200000", "data": data}
 
-class BinanceConnectorAPI:
-    """
-    Backward compatibility wrapper for the AsyncBinanceConnectorAPI.
-    Allows existing code to use the new async implementation synchronously.
-    """
-    
-    def __init__(
-        self,
-        api_key: str = None,
-        api_secret: str = None,
-        base_url: str = "https://api.binance.com",
-        timeout: int = 10,
-        proxies: Dict[str, str] = None
-    ):
-        """
-        Initialize the backward compatibility wrapper.
-        
-        Args:
-            api_key: Binance API key
-            api_secret: Binance API secret
-            base_url: API base URL
-            timeout: Request timeout in seconds
-            proxies: Proxy configuration
-        """
-        # Store credentials
-        self.api_key = api_key or os.getenv("BINANCE_API_KEY", "")
-        self.api_secret = api_secret or os.getenv("BINANCE_API_SECRET", "")
-        
-        # Initialize async client
-        self.async_api = AsyncBinanceConnectorAPI(
-            api_key=self.api_key,
-            api_secret=self.api_secret,
-            base_url=base_url,
-            timeout=timeout,
-            proxies=proxies
-        )
-    
-    def _run_async(self, coroutine):
-        """Helper to run async functions synchronously"""
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Create a new event loop if the current one is already running
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-        return loop.run_until_complete(coroutine)
-    
-    # Market Data Methods
-    
-    def get_ticker(self, symbol: str = "BTCUSDT") -> Dict[str, Any]:
-        """Get ticker information for a symbol"""
-        return self._run_async(self.async_api.get_ticker(symbol))
-    
-    def get_ticker_24hr(self, symbol: str = "BTCUSDT") -> Dict[str, Any]:
-        """Get 24-hour statistics for a symbol"""
-        return self._run_async(self.async_api.get_ticker_24hr(symbol))
-    
-    def get_exchange_info(self) -> Dict[str, Any]:
-        """Get exchange trading rules and symbol information"""
-        return self._run_async(self.async_api.get_exchange_info())
-    
-    # Account Methods
-    
-    def get_margin_account(self) -> Dict[str, Any]:
-        """Get cross margin account details"""
-        return self._run_async(self.async_api.get_margin_account())
-    
-    def get_isolated_margin_account(self, symbols: Optional[str] = None) -> Dict[str, Any]:
-        """Get isolated margin account details"""
-        return self._run_async(self.async_api.get_isolated_margin_account(symbols))
-    
-    # Order Methods
-    
-    def create_margin_order(self, **kwargs) -> Dict[str, Any]:
-        """Create a new margin order"""
-        return self._run_async(self.async_api.create_margin_order(**kwargs))
-    
-    def place_order(self, **kwargs) -> Dict[str, Any]:
-        """Place a regular spot order"""
-        return self._run_async(self.async_api.place_order(**kwargs))
-    
-    def cancel_order(self, **kwargs) -> Dict[str, Any]:
-        """Cancel an existing order"""
-        return self._run_async(self.async_api.cancel_order(**kwargs))
-    
-    def create_stop_order(self, **kwargs) -> Dict[str, Any]:
-        """Create a stop loss or take profit order"""
-        return self._run_async(self.async_api.create_stop_order(**kwargs))
+
+

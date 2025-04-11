@@ -14,10 +14,10 @@ client = Client(api_key=api_key, api_secret=api_secret)
 order = client.new_margin_order(
     symbol="BTCUSDC",
     side="SELL",
-    type="LIMIT",
-    quantity=0.0004,
-    price="150000",
-    timeInForce="GTC",
+    type="MARKET",
+    quantity=0.0001,
+    #price="150000",
+    #timeInForce="GTC",
     sideEffectType = "AUTO_BORROW_REPAY"
     )
 

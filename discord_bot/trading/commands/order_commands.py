@@ -33,71 +33,6 @@ class OrderCommands:
         self.reaction_handler = reaction_handler
         logger.debug("Initialized OrderCommands")
     
-    async def handle_test_trade(
-        self,
-        ctx: commands.Context,
-        market: str = "BTCUSDT",
-        side: str = "buy",
-        amount: float = 0.001,
-        price: Optional[float] = None,
-        order_type: str = "limit"
-    ) -> None:
-        """
-        Handle the test trade command.
-        
-        Args:
-            ctx: Discord context
-            market: Trading pair
-            side: Buy or sell
-            amount: Amount to trade
-            price: Price for limit orders
-            order_type: Type of order (market or limit)
-        """
-        # Normalize inputs
-        market = market.upper()
-        order_type = order_type.lower()
-        side_enum = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
-        order_type_enum = OrderType.LIMIT if order_type == "limit" else OrderType.MARKET
-        
-        # Set default price for limit orders if not provided
-        if order_type_enum == OrderType.LIMIT and price is None:
-            try:
-                ticker_data = await self.market_service.get_ticker(market)
-                if ticker_data:
-                    price = float(ticker_data.get("price", 0))
-                else:
-                    await ctx.send("❌ Price is required for limit orders.")
-                    return
-            except Exception as e:
-                await ctx.send(f"❌ Error getting current price: {str(e)}")
-                return
-        
-        # Round amount to 5 decimal places (Binance requirement)
-        amount = round(amount, 5)
-        
-        # Create the order request
-        order_request = OrderRequest(
-            symbol=market,
-            side=side_enum,
-            order_type=order_type_enum,
-            amount=amount,
-            price=price
-        )
-        
-        # Create a simulated order ID
-        test_order_id = f"test-{int(datetime.now().timestamp())}"
-        
-        # Create the embed
-        embed = self.order_formatter.format_test_order(order_request, test_order_id)
-        
-        # Send the message
-        message = await ctx.send(embed=embed)
-        
-        # Add the clipboard emoji reaction for testing purposes
-        await message.add_reaction("📋")
-        
-        # Register with reaction handler
-        self.reaction_handler.register_message(message.id, test_order_id)
     
     async def handle_real_order(
         self,
@@ -106,8 +41,8 @@ class OrderCommands:
         side: Optional[str] = None,
         amount: Optional[str] = None,
         price_or_type: Optional[str] = None,
-        order_type: str = "limit",
-        auto_borrow: bool = False
+        order_type: str = "limit",  # <--- Expects order_type here
+        auto_borrow: bool = False   # <--- Expects auto_borrow here
     ) -> None:
         """
         Handle the real order command.
@@ -191,7 +126,9 @@ class OrderCommands:
                             price = float(ticker_data.get("price", 0))
                     except:
                         pass
-                
+
+                logger.info(f"Value of 'auto_borrow' before creating OrderRequest: {auto_borrow} (Type: {type(auto_borrow)})") # <-- ADD THIS LINE
+
                 # Create the order request
                 order_request = OrderRequest(
                     symbol=market.upper(),
@@ -201,7 +138,7 @@ class OrderCommands:
                     price=price,
                     use_funds=use_funds,
                     auto_borrow=auto_borrow,  # Use the parameter
-                    is_isolated=True  # Always use isolated margin
+                    is_isolated=False  # Always use isolated margin
                 )
             except Exception as e:
                 await ctx.send(f"❌ Error processing order parameters: {str(e)}")
@@ -241,14 +178,15 @@ class OrderCommands:
         market: Optional[str] = None,
         side: Optional[str] = None,
         stop_price: Optional[str] = None,
-        stop_type: str = "loss",
-        order_type: str = "limit",
-        price_or_size: Optional[str] = None,
-        size_or_funds: Optional[str] = None
+        stop_type: str = "loss",      # 'loss' or 'entry'
+        order_type: str = "limit",    # 'limit' or 'market'
+        price_or_size: Optional[str] = None, # Price for LIMIT, Size for MARKET
+        size_or_funds: Optional[str] = None, # Size for LIMIT
+        auto_borrow: bool = False      # <<< Added parameter
     ) -> None:
         """
         Handle the stop order command.
-        
+
         Args:
             ctx: Discord context
             market: Trading pair symbol
@@ -257,38 +195,44 @@ class OrderCommands:
             stop_type: Type of stop order - 'loss' or 'entry' (default: 'loss')
             order_type: Order type (market or limit)
             price_or_size: Price for limit orders, or size for market orders
-            size_or_funds: Size for limit orders, 'funds' keyword for market buy
+            size_or_funds: Size for limit orders
+            auto_borrow: Whether to enable auto-borrowing (True/False)
         """
         # Security measure: Check if user has the correct role
         required_role = discord.utils.get(ctx.guild.roles, name="Trading-Authorized")
         if required_role is None or required_role not in ctx.author.roles:
             await ctx.send("⛔ You don't have permission to place stop orders. You need the 'Trading-Authorized' role.")
             return
-        
-        # If no parameters were provided, collect them interactively
+
+        # If no parameters were provided, collect them interactively (or provide better format guidance)
         if not all([market, side, stop_price]):
-            await ctx.send("❌ Missing required parameters. Format: !stoporder <market> <side> <stop_price> [stop_type] [order_type] [price_or_size] [size_or_funds]")
+            # Consider adding interactive input collection here similar to handle_real_order
+            # For now, just show format help
+            await ctx.send("❌ Missing required parameters. Format: `!stoporder <market> <side> <stop_price> [stop_type] [order_type] [price_or_size] [size_or_funds] [auto_borrow]`")
             return
-        
+
         try:
+            # --- Parameter Processing ---
+            market = market.upper() # Ensure uppercase
+
             # Process side
             side = side.lower()
             if side not in ["buy", "sell"]:
                 await ctx.send("❌ Invalid side. Must be 'buy' or 'sell'.")
                 return
-            
+
             # Process stop type
             stop_type = stop_type.lower()
             if stop_type not in ["loss", "entry"]:
                 await ctx.send("❌ Invalid stop type. Must be 'loss' or 'entry'.")
                 return
-            
+
             # Process order type
             order_type = order_type.lower()
             if order_type not in ["limit", "market"]:
                 await ctx.send("❌ Invalid order type. Must be 'limit' or 'market'.")
                 return
-            
+
             # Process stop price
             try:
                 stop_price_float = float(stop_price)
@@ -298,223 +242,228 @@ class OrderCommands:
             except ValueError:
                 await ctx.send("❌ Invalid stop price. Must be a number.")
                 return
-            
-            # Get current price to validate 10% rule
-            ticker_data = await self.market_service.get_ticker(market)
-            if ticker_data:
-                current_price = float(ticker_data.get("price", 0))
-                # Check if stop price is within 10% of current price
-                diff_percent = abs((stop_price_float - current_price) / current_price) * 100
-                if diff_percent > 10:
-                    await ctx.send(f"❌ Stop price must be within 10% of the current price. Current: ${current_price}, Stop: ${stop_price_float}, Difference: {diff_percent:.2f}%")
-                    return
-            
-            # Determine the Binance order type based on our parameters
+
+            # --- Determine Side Effect Type ---
+            side_effect = "AUTO_BORROW_REPAY" if auto_borrow else "NO_SIDE_EFFECT"
+            logger.debug(f"Handling stop order for {market}. Side: {side}, Stop Type: {stop_type}, Order Type: {order_type}, Auto Borrow: {auto_borrow}, Side Effect: {side_effect}")
+
+            # --- (Optional but Recommended) 10% Price Check ---
+            try:
+                ticker_data = await self.market_service.get_ticker(market)
+                if ticker_data and not ticker_data.get("error"):
+                    current_price = float(ticker_data["data"].get("price", 0))
+                    if current_price > 0:
+                        diff_percent = abs((stop_price_float - current_price) / current_price) * 100
+                        # Allow larger difference for TP/SL farther away? Adjust threshold if needed.
+                        if diff_percent > 10:
+                            logger.warning(f"Stop price {stop_price_float} is >10% away from current price {current_price} for {market}. Proceeding anyway.")
+                            # Decide if you want to block this or just warn
+                            # await ctx.send(f"⚠️ Stop price must be within 10% of the current price. Current: ${current_price:.2f}, Stop: ${stop_price_float:.2f}, Difference: {diff_percent:.2f}%")
+                            # return
+                else:
+                    logger.warning(f"Could not get current price for {market} to perform 10% check.")
+            except Exception as price_check_error:
+                logger.warning(f"Error during price check for 10% rule: {price_check_error}")
+
+
+            # Determine the Binance API order type
+            # Note: Your API examples used TAKE_PROFIT/STOP_LOSS directly, not _LIMIT versions
+            # If you want _LIMIT functionality, adjust logic here and parameter requirements
             if stop_type == "loss":
                 if order_type == "limit":
                     binance_order_type = "STOP_LOSS_LIMIT"
-                else:
-                    binance_order_type = "STOP_LOSS"
-            else:  # entry
+                else: # Market
+                    binance_order_type = "STOP_LOSS" # API uses this for market stop loss
+            else:  # entry ('take_profit' from user perspective)
                 if order_type == "limit":
                     binance_order_type = "TAKE_PROFIT_LIMIT"
-                else:
-                    binance_order_type = "TAKE_PROFIT"
-            
-            # Process remaining parameters based on order type
+                else: # Market
+                    binance_order_type = "TAKE_PROFIT" # API uses this for market take profit
+
+            logger.debug(f"Mapped to Binance API order type: {binance_order_type}")
+
+            # Process remaining parameters based on limit/market
+            price: Optional[float] = None
+            size: Optional[float] = None
+
             if order_type == "limit":
-                # For limit orders, we need price and size
+                # For LIMIT stops, we need price and size
                 if not price_or_size:
-                    await ctx.send("❌ Price is required for limit orders.")
+                    await ctx.send("❌ Price (as `price_or_size`) is required for LIMIT stop orders.")
                     return
-                
                 try:
                     price = float(price_or_size)
                     if price <= 0:
-                        await ctx.send("❌ Price must be positive.")
+                        await ctx.send("❌ Limit price must be positive.")
                         return
                 except ValueError:
-                    await ctx.send("❌ Invalid price. Must be a number.")
+                    await ctx.send("❌ Invalid limit price. Must be a number.")
                     return
-                
+
                 if not size_or_funds:
-                    await ctx.send("❌ Size is required for limit orders.")
+                    await ctx.send("❌ Size (as `size_or_funds`) is required for LIMIT stop orders.")
                     return
-                
                 try:
                     size = float(size_or_funds)
                     if size <= 0:
                         await ctx.send("❌ Size must be positive.")
                         return
-                        
-                    # Round to 5 decimal places
-                    size = round(size, 5)
+                    size = round(size, 5) # Round quantity
                 except ValueError:
                     await ctx.send("❌ Invalid size. Must be a number.")
                     return
-                
-                # Get confirmation
-                stop_type_description = "stop-loss" if stop_type == "loss" else "stop-entry"
+
+                # --- Limit Order Confirmation ---
+                stop_type_description = "Stop-Loss" if stop_type == "loss" else "Take-Profit/Entry"
+                confirmation_details = (
+                    f"You are about to place a **{stop_type_description} {side.upper()} LIMIT** order:\n"
+                    f"- **Market:** {market}\n"
+                    f"- **Quantity:** {size}\n"
+                    f"- **Trigger Price:** ${stop_price_float:.2f}\n"
+                    f"- **Order Price:** ${price:.2f}\n"
+                    f"- **Side Effect:** `{side_effect}`"
+                )
+                if auto_borrow:
+                    confirmation_details += "\n\n⚠️ **This order will automatically borrow assets if necessary.**"
+
                 confirmed = await self.input_manager.confirm_action(
                     ctx,
-                    title=f"⚠️ Confirm {stop_type_description.capitalize()} Limit Order",
-                    description=f"You are about to place a {stop_type_description} {side} limit order for {size} {market} at price ${price} when triggered at ${stop_price_float}.",
-                    color=discord.Color.gold()
+                    title=f"⚠️ Confirm {stop_type_description} Limit Order",
+                    description=confirmation_details,
+                    color=discord.Color.gold(),
+                    use_reactions=True # Or False if you prefer text confirm
                 )
-                
+
                 if not confirmed:
                     await ctx.send("🛑 Stop order cancelled.")
                     return
-                
-                # Place the order
+
+                # --- Place Limit Stop Order via Service ---
                 response = await self.binance_service.place_stop_order(
                     symbol=market,
                     side=side,
                     stop_price=stop_price_float,
                     quantity=size,
                     order_type=binance_order_type,
-                    price=price,
-                    is_isolated=True
+                    price=price, # Pass limit price
+                    is_isolated=False, # Defaulting to Cross Margin, adjust if needed
+                    side_effect_type=side_effect # Pass the determined side effect
                 )
-            else:
-                # For market orders, we need either size or funds
+
+            else: # Market Order Path
+                # For MARKET stops, we need size (passed as price_or_size)
                 if not price_or_size:
-                    await ctx.send("❌ Size is required for market orders.")
+                    await ctx.send("❌ Size (as `price_or_size`) is required for MARKET stop orders.")
                     return
-                
-                # Market orders on Binance need quantity
                 try:
                     size = float(price_or_size)
                     if size <= 0:
                         await ctx.send("❌ Size must be positive.")
                         return
-                        
-                    # Round to 5 decimal places
-                    size = round(size, 5)
+                    size = round(size, 5) # Round quantity
                 except ValueError:
                     await ctx.send("❌ Invalid size. Must be a number.")
                     return
-                
-                # Get confirmation
-                stop_type_description = "stop-loss" if stop_type == "loss" else "stop-entry"
+
+                # --- Market Order Confirmation ---
+                stop_type_description = "Stop-Loss" if stop_type == "loss" else "Take-Profit/Entry"
+                confirmation_details = (
+                    f"You are about to place a **{stop_type_description} {side.upper()} MARKET** order:\n"
+                    f"- **Market:** {market}\n"
+                    f"- **Quantity:** {size}\n"
+                    f"- **Trigger Price:** ${stop_price_float:.2f}\n"
+                    f"- **Side Effect:** `{side_effect}`"
+                )
+                if auto_borrow:
+                    confirmation_details += "\n\n⚠️ **This order will automatically borrow assets if necessary.**"
+
                 confirmed = await self.input_manager.confirm_action(
                     ctx,
-                    title=f"⚠️ Confirm {stop_type_description.capitalize()} Market Order",
-                    description=f"You are about to place a {stop_type_description} {side} market order for {size} {market} when triggered at ${stop_price_float}.",
-                    color=discord.Color.gold()
+                    title=f"⚠️ Confirm {stop_type_description} Market Order",
+                    description=confirmation_details,
+                    color=discord.Color.gold(),
+                    use_reactions=True # Or False if you prefer text confirm
                 )
-                
+
                 if not confirmed:
                     await ctx.send("🛑 Stop order cancelled.")
                     return
-                
-                # Place the order
+
+                # --- Place Market Stop Order via Service ---
                 response = await self.binance_service.place_stop_order(
                     symbol=market,
                     side=side,
                     stop_price=stop_price_float,
                     quantity=size,
                     order_type=binance_order_type,
-                    is_isolated=True
+                    price=None, # No limit price for market
+                    is_isolated=False, # Defaulting to Cross Margin, adjust if needed
+                    side_effect_type=side_effect # Pass the determined side effect
                 )
-            
-            # Create and send the response embed
-            if not response.get("error", False):
-                order_id = response.get("data", {}).get("orderId")
-                client_order_id = response.get("data", {}).get("clientOrderId")
-                stop_type_description = "Stop-Loss" if stop_type == "loss" else "Stop-Entry"
+
+            # --- Process and Send Response ---
+            if isinstance(response, dict) and not response.get("error", False):
+                # Assuming response['data'] contains the order details if successful
+                order_data = response.get("data", {})
+                order_id = order_data.get("orderId")
+                client_order_id = order_data.get("clientOrderId")
+                status = order_data.get("status", "UNKNOWN") # Status might be NEW for stops
+
+                stop_type_display = "Stop-Loss" if stop_type == "loss" else "Take-Profit/Entry"
                 embed = discord.Embed(
-                    title=f"✅ {stop_type_description} {side.capitalize()} Order Placed",
-                    description=f"{stop_type_description} {order_type} order placed successfully for {market}",
+                    title=f"✅ {stop_type_display} Order Placed/Accepted",
+                    description=f"{stop_type_display} {order_type.upper()} order accepted for `{market}`.",
                     color=discord.Color.green(),
                     timestamp=datetime.now()
                 )
-                
+
+                embed.add_field(name="Market", value=market, inline=True)
                 embed.add_field(name="Side", value=side.upper(), inline=True)
-                embed.add_field(name="Type", value=f"{stop_type_description} {order_type.capitalize()}", inline=True)
-                embed.add_field(name="Trigger Price", value=f"${stop_price_float}", inline=True)
-                
+                embed.add_field(name="Trigger Price", value=f"${stop_price_float:.2f}", inline=True)
+
                 if order_type == "limit":
-                    embed.add_field(name="Order Price", value=f"${price}", inline=True)
-                    embed.add_field(name="Size", value=size, inline=True)
-                else:
-                    embed.add_field(name="Size", value=size, inline=True)
-                
-                embed.add_field(name="Order ID", value=f"`{order_id}`", inline=False)
-                
+                    embed.add_field(name="Order Type", value=f"LIMIT (Stop)", inline=True)
+                    embed.add_field(name="Order Price", value=f"${price:.2f}", inline=True)
+                    embed.add_field(name="Quantity", value=f"{size}", inline=True)
+                else: # Market
+                    embed.add_field(name="Order Type", value=f"MARKET (Stop)", inline=True)
+                    embed.add_field(name="Quantity", value=f"{size}", inline=True)
+                    embed.add_field(name=" ", value=" ", inline=True) # Placeholder for alignment
+
+                embed.add_field(name="Binance Type", value=f"`{binance_order_type}`", inline=True)
+                embed.add_field(name="Side Effect", value=f"`{side_effect}`", inline=True)
+                embed.add_field(name="Status", value=status, inline=True)
+
+                if order_id:
+                    embed.add_field(name="Order ID", value=f"`{order_id}`", inline=False)
+                if client_order_id:
+                    embed.add_field(name="Client OID", value=f"`{client_order_id}`", inline=False)
+
+                embed.set_footer(text=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
+
                 message = await ctx.send(embed=embed)
-                await message.add_reaction("📋")
-                self.reaction_handler.register_message(message.id, str(order_id))
+                # Add reaction for copying ID if needed
+                if order_id:
+                    await message.add_reaction("📋")
+                    self.reaction_handler.register_message(message.id, str(order_id)) # Ensure ID is string
+
             else:
-                error_msg = response.get("msg", "Unknown error")
+                # Handle API errors or unexpected responses
+                error_msg = response.get("msg", "Unknown error during stop order placement.") if isinstance(response, dict) else str(response)
+                logger.error(f"Stop order failed for {market}: {error_msg}")
                 embed = discord.Embed(
                     title="❌ Stop Order Failed",
-                    description=f"Failed to place stop order: {error_msg}",
+                    description=f"Failed to place stop order for `{market}`.",
                     color=discord.Color.red(),
                     timestamp=datetime.now()
                 )
+                embed.add_field(name="Error Details", value=f"```{error_msg}```", inline=False)
                 await ctx.send(embed=embed)
-                
-        except Exception as e:
-            logger.error(f"Error placing stop order: {str(e)}")
-            await ctx.send(f"❌ Error placing stop order: {str(e)}")
 
-    async def handle_cancel_order(self, ctx: commands.Context, order_id: Optional[str] = None, symbol: Optional[str] = None) -> None:
-        """
-        Handle the cancel order command.
-        
-        Args:
-            ctx: Discord context
-            order_id: Order ID to cancel
-            symbol: Trading pair symbol (required for Binance)
-        """
-        # Security measure: Check if user has the correct role
-        required_role = discord.utils.get(ctx.guild.roles, name="Trading-Authorized")
-        if required_role is None or required_role not in ctx.author.roles:
-            await ctx.send("⛔ You don't have permission to cancel orders. You need the 'Trading-Authorized' role.")
-            return
-        
-        # If no order ID was provided, ask for it interactively
-        if not order_id:
-            order_id = await self.input_manager.collect_input(
-                ctx,
-                "Please enter the order ID you want to cancel:",
-                timeout=30
-            )
-            
-            if not order_id:
-                return  # User cancelled or timed out
-        
-        # If no symbol was provided, ask for it interactively (Binance requires symbol)
-        if not symbol:
-            symbol = await self.input_manager.collect_input(
-                ctx,
-                "Please enter the trading pair symbol (e.g., BTCUSDT):",
-                timeout=30
-            )
-            
-            if not symbol:
-                return  # User cancelled or timed out
-        
-        # Confirmation before proceeding
-        confirmed = await self.input_manager.confirm_action(
-            ctx,
-            title="⚠️ Confirm Order Cancellation",
-            description=f"Are you sure you want to cancel order ID: `{order_id}` for {symbol}?",
-            color=discord.Color.gold(),
-            use_reactions=False  # Use text confirmation instead
-        )
-        
-        if not confirmed:
-            await ctx.send("🛑 Order cancellation aborted.")
-            return
-        
-        # Process the cancellation
-        processing_message = await ctx.send("⏳ Processing order cancellation...")
-        
-        # Call the API to cancel the order
-        success, message = await self.binance_service.cancel_order(order_id, symbol)
-        
-        # Create and send the embed
-        embed = self.order_formatter.format_cancel_response(success, message, order_id)
-        await processing_message.edit(content=None, embed=embed)
+        except ValueError as ve:
+             logger.warning(f"Value error processing stop order command: {ve}")
+             await ctx.send(f"❌ Input Error: {ve}")
+        except Exception as e:
+            logger.exception(f"Unexpected error handling stop order for {market}: {e}") # Use exception for stack trace
+            await ctx.send(f"❌ An unexpected error occurred: {e}")
+
