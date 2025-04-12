@@ -168,6 +168,28 @@ class AsyncBinanceConnectorClient(AsyncBaseAPI):
         return await self._run_client_method('isolated_margin_account', **params)
     
     # Order endpoints
+
+    @require_api_key
+    async def get_open_margin_orders(self, symbol: Optional[str] = None, is_isolated: Optional[bool] = None) -> Dict[str, Any]:
+        """
+        Query open margin orders.
+
+        Args:
+            symbol: Filter by trading pair symbol (optional).
+            is_isolated: Filter by isolated margin (optional, True/False). Defaults to False (Cross).
+
+        Returns:
+            List of open orders or error dictionary.
+        """
+        params = {}
+        if symbol:
+            params["symbol"] = symbol
+        if is_isolated is not None:
+            params["isIsolated"] = "TRUE" if is_isolated else "FALSE"
+
+        # Log the parameters being sent
+        logger.debug(f"Calling API 'margin_open_orders' with params: {params}")
+        return await self._run_client_method('margin_open_orders', **params)
     
     @require_api_key
     async def create_margin_order(
@@ -582,7 +604,105 @@ class AsyncBinanceConnectorAPI:
             
         return {"code": "200000", "data": data}
 
+    @require_api_key
+    async def create_margin_oco_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        price: float,
+        stop_price: float,
+        is_isolated: bool = False,
+        list_client_order_id: Optional[str] = None,
+        limit_client_order_id: Optional[str] = None,
+        limit_iceberg_qty: Optional[float] = None,
+        stop_client_order_id: Optional[str] = None,
+        stop_limit_price: Optional[float] = None,
+        stop_iceberg_qty: Optional[float] = None,
+        stop_limit_time_in_force: Optional[str] = None,
+        new_order_resp_type: Optional[str] = None,
+        side_effect_type: str = "NO_SIDE_EFFECT"
+    ) -> Dict[str, Any]:
+        """
+        Create a margin account OCO (One-Cancels-the-Other) order.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., BTCUSDT)
+            side: BUY or SELL
+            quantity: Quantity to trade
+            price: Limit order price
+            stop_price: Stop trigger price
+            is_isolated: Whether to use isolated margin (default: False)
+            list_client_order_id: A unique ID for the entire orderList
+            limit_client_order_id: A unique ID for the limit order
+            limit_iceberg_qty: Iceberg quantity for the limit order
+            stop_client_order_id: A unique ID for the stop loss order
+            stop_limit_price: Price for stop limit order
+            stop_iceberg_qty: Iceberg quantity for the stop order
+            stop_limit_time_in_force: Time in force for stop limit leg (GTC/FOK/IOC)
+            new_order_resp_type: Response JSON format
+            side_effect_type: NO_SIDE_EFFECT, MARGIN_BUY, AUTO_REPAY, AUTO_BORROW_REPAY
+                
+        Returns:
+            OCO order response
+        """
 
+        logger.info(f"[OCO_ORDER] Starting OCO order creation for {symbol}")
+        logger.debug(f"[OCO_ORDER] Full params: symbol={symbol}, side={side}, quantity={quantity}, price={price}, stop_price={stop_price}, is_isolated={is_isolated}")
+    
+        params = {
+            "symbol": symbol,
+            "side": side.upper(),
+            "quantity": f"{quantity:.5f}",  # Round to 5 decimals
+            "price": f"{price:.2f}", 
+            "stopPrice": f"{stop_price:.2f}"
+        }
+        
+        # Add optional parameters if provided
+        if is_isolated:
+            params["isIsolated"] = "TRUE"
+        
+        if list_client_order_id:
+            params["listClientOrderId"] = list_client_order_id
+            
+        if limit_client_order_id:
+            params["limitClientOrderId"] = limit_client_order_id
+            
+        if limit_iceberg_qty is not None:
+            params["limitIcebergQty"] = f"{limit_iceberg_qty:.5f}"
+            
+        if stop_client_order_id:
+            params["stopClientOrderId"] = stop_client_order_id
+            
+        if stop_limit_price is not None:
+            params["stopLimitPrice"] = f"{stop_limit_price:.2f}"
+            # If stop limit price is provided, stopLimitTimeInForce is required
+            if not stop_limit_time_in_force:
+                stop_limit_time_in_force = "GTC"  # Default to GTC if not provided
+                
+        if stop_iceberg_qty is not None:
+            params["stopIcebergQty"] = f"{stop_iceberg_qty:.5f}"
+            
+        if stop_limit_time_in_force:
+            params["stopLimitTimeInForce"] = stop_limit_time_in_force
+            
+        if new_order_resp_type:
+            params["newOrderRespType"] = new_order_resp_type
+            
+        if side_effect_type:
+            params["sideEffectType"] = side_effect_type
+        
+        logger.debug(f"[OCO_ORDER] Constructed API request params: {params}")
+        logger.info(f"[OCO_ORDER] Calling Binance API method 'new_margin_oco_order'")
+
+        response = await self.client._run_client_method('new_margin_oco_order', **params)
+        success, data, error = await self._process_response(response)
+        
+        if not success:
+            logger.warning(f"Failed to create margin OCO order: {error}")
+            return {"error": True, "msg": error}
+            
+        return {"code": "200000", "data": data}
 
     @require_api_key
     async def create_stop_order(
@@ -650,5 +770,18 @@ class AsyncBinanceConnectorAPI:
             
         return {"code": "200000", "data": data}
 
+    @require_api_key
+    async def get_open_margin_orders(self, symbol: Optional[str] = None, is_isolated: Optional[bool] = None) -> Dict[str, Any]:
+        # ... (previous code) ...
+        response = await self.client.get_open_margin_orders(symbol=symbol, is_isolated=is_isolated)
+        success, data, error = await self._process_response(response)
 
+        if not success:
+            logger.warning(f"Failed to get open margin orders: {error}")
+            return {"error": True, "msg": error}
 
+        # Correctly log the count of items in the 'data' list if it's a list
+        count = len(data) if isinstance(data, list) else "N/A (data is not a list)"
+        # logger.info(f"Successfully fetched {len(data) if isinstance(data, list) else 'N/A'} open margin orders.") # OLD
+        logger.info(f"Successfully fetched {count} open margin orders.") # NEW log line
+        return {"code": "200000", "data": data}

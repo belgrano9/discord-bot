@@ -8,6 +8,7 @@ from discord.ext import commands
 from datetime import datetime
 from typing import Optional
 from loguru import logger
+import time 
 
 from ..models.order import OrderRequest, OrderSide, OrderType
 from ..services.binance_service import BinanceService
@@ -34,6 +35,9 @@ class OrderCommands:
         logger.debug("Initialized OrderCommands")
     
     
+
+
+
     async def handle_real_order(
         self,
         ctx: commands.Context,
@@ -467,3 +471,285 @@ class OrderCommands:
             logger.exception(f"Unexpected error handling stop order for {market}: {e}") # Use exception for stack trace
             await ctx.send(f"❌ An unexpected error occurred: {e}")
 
+    async def handle_oco_order(
+        self,
+        ctx: commands.Context,
+        market: Optional[str] = None,
+        side: Optional[str] = None,
+        quantity: Optional[str] = None,
+        limit_price: Optional[str] = None,
+        stop_price: Optional[str] = None,
+        stop_limit_price: Optional[str] = None,
+        auto_borrow: bool = False
+    ) -> None:
+        """
+        Handle OCO (One-Cancels-the-Other) order command.
+        
+        Args:
+            ctx: Discord context
+            market: Trading pair symbol
+            side: Buy or sell
+            quantity: Amount to trade
+            limit_price: Price for the limit order
+            stop_price: Trigger price for the stop order
+            stop_limit_price: Optional limit price for the stop (if None, uses market stop)
+            auto_borrow: Whether to enable auto-borrowing
+        """
+        # Generate tracking ID for this command
+        cmd_id = f"{ctx.author.id}_{int(time.time())}"
+        logger.info(f"[OCO_CMD:{cmd_id}] User {ctx.author} ({ctx.author.id}) initiated OCO order command")
+        logger.debug(f"[OCO_CMD:{cmd_id}] Raw params: market={market}, side={side}, quantity={quantity}, limit_price={limit_price}, stop_price={stop_price}, stop_limit_price={stop_limit_price}, auto_borrow={auto_borrow}")
+        
+        # Security check
+        required_role = discord.utils.get(ctx.guild.roles, name="Trading-Authorized")
+        if required_role is None or required_role not in ctx.author.roles:
+            logger.warning(f"[OCO_CMD:{cmd_id}] Permission denied - user lacks 'Trading-Authorized' role")
+            await ctx.send("⛔ You don't have permission to place orders. You need the 'Trading-Authorized' role.")
+            return
+        
+        # Validate inputs
+        if not all([market, side, quantity, limit_price, stop_price]):
+            logger.warning(f"[OCO_CMD:{cmd_id}] Missing required parameters")
+            await ctx.send("❌ Missing required parameters. Format: `!oco <market> <side> <quantity> <limit_price> <stop_price> [stop_limit_price] [auto_borrow]`")
+            return
+        
+        # Log important information about market stop vs stop limit
+        market_stop = stop_limit_price is None or stop_limit_price.lower() in ['0', 'none', 'null', 'market'] or (stop_limit_price.isdigit() and float(stop_limit_price) == 0)
+
+        logger.info(f"[OCO_CMD:{cmd_id}] Order type: {'Market Stop' if market_stop else 'Stop Limit'} OCO with auto_borrow={auto_borrow}")
+        
+        try:
+            # Process side
+            side = side.lower()
+            if side not in ["buy", "sell"]:
+                await ctx.send("❌ Invalid side. Must be 'buy' or 'sell'.")
+                return
+            
+            # Process quantity
+            try:
+                quantity_float = float(quantity)
+                if quantity_float <= 0:
+                    await ctx.send("❌ Quantity must be positive.")
+                    return
+            except ValueError:
+                await ctx.send("❌ Invalid quantity. Must be a number.")
+                return
+            
+            # Process limit price
+            try:
+                limit_price_float = float(limit_price)
+                if limit_price_float <= 0:
+                    await ctx.send("❌ Limit price must be positive.")
+                    return
+            except ValueError:
+                await ctx.send("❌ Invalid limit price. Must be a number.")
+                return
+            
+            # Process stop price
+            try:
+                stop_price_float = float(stop_price)
+                if stop_price_float <= 0:
+                    await ctx.send("❌ Stop price must be positive.")
+                    return
+            except ValueError:
+                await ctx.send("❌ Invalid stop price. Must be a number.")
+                return
+            
+            # Process optional stop limit price
+            stop_limit_price_float = None
+            if stop_limit_price:
+                # Check if user is trying to specify "0" or "null" to indicate market stop
+                if stop_limit_price.lower() in ['0', 'null', 'none', 'market'] or stop_limit_price == '0':
+                    # This indicates they want a market stop
+                    stop_limit_price_float = None
+                    logger.debug(f"[OCO] User specified '{stop_limit_price}' for stop_limit_price - interpreting as market stop")
+                else:
+                    try:
+                        stop_limit_price_float = float(stop_limit_price)
+                        if stop_limit_price_float <= 0:
+                            await ctx.send("❌ Stop limit price must be positive.")
+                            return
+                    except ValueError:
+                        await ctx.send("❌ Invalid stop limit price. Must be a number.")
+                        return
+            
+            # Get confirmation
+            if side == "buy":
+                description = (
+                    f"You are about to place an OCO BUY order:\n"
+                    f"- **Market:** {market.upper()}\n"
+                    f"- **Quantity:** {quantity_float}\n"
+                    f"- **Limit Price:** ${limit_price_float}\n"
+                    f"- **Stop Price:** ${stop_price_float}\n"
+                )
+                if stop_limit_price_float:
+                    description += f"- **Stop Limit Price:** ${stop_limit_price_float}\n"
+                if auto_borrow:
+                    description += "\n⚠️ **This order will automatically borrow funds if necessary.**"
+            else:
+                description = (
+                    f"You are about to place an OCO SELL order:\n"
+                    f"- **Market:** {market.upper()}\n"
+                    f"- **Quantity:** {quantity_float}\n"
+                    f"- **Limit Price:** ${limit_price_float}\n"
+                    f"- **Stop Price:** ${stop_price_float}\n"
+                )
+                if stop_limit_price_float:
+                    description += f"- **Stop Limit Price:** ${stop_limit_price_float}\n"
+                if auto_borrow:
+                    description += "\n⚠️ **This order will automatically borrow assets if necessary.**"
+            
+            logger.info(f"[OCO_CMD:{cmd_id}] Requesting user confirmation")
+            confirmed = await self.input_manager.confirm_action(
+                ctx,
+                title="⚠️ Confirm OCO Order",
+                description=description,
+                color=discord.Color.gold(),
+                use_reactions=True
+            )
+            
+            if not confirmed:
+                await ctx.send("🛑 OCO order cancelled.")
+                return
+            
+            """ 
+            # --- Estimate Margin Level Impact IF Auto Borrow is True ---
+            if auto_borrow:
+                logger.info(f"[OCO_CMD:{cmd_id}] Auto-borrow enabled. Estimating potential margin impact...")
+                try:
+                    # 1. Fetch current cross margin account summary
+                    account_summary = await self.binance_service.get_cross_margin_account_summary()
+
+                    if account_summary and not account_summary.get("error"):
+                        current_assets_btc = account_summary.get('total_asset_btc')
+                        current_liabilities_btc = account_summary.get('total_liability_btc')
+                        current_margin_level = account_summary.get('current_margin_level')
+
+                        # 2. Fetch current market price for conversion/valuation
+                        # Ensure market is uppercase for API/service calls
+                        market_upper = market.upper() if market else None
+                        if not market_upper:
+                            raise ValueError("Market symbol is missing for price lookup.")
+
+                        ticker_data = await self.market_service.get_ticker(market_upper)
+                        if ticker_data and not ticker_data.get("error"):
+                            # Adapt based on your get_ticker response structure
+                            current_price_str = ticker_data.get("data", {}).get("price")
+                            if not current_price_str:
+                                raise ValueError(f"Could not extract price from ticker data for {market_upper}")
+                            current_price = float(current_price_str)
+
+                            # Convert current assets/liabilities to USD equivalent
+                            current_assets_usd = current_assets_btc * current_price
+                            current_liabilities_usd = current_liabilities_btc * current_price
+
+                            # 3. Estimate the value of the new borrow in USD
+                            new_borrow_value_usd = 0
+                            calculation_note = ""
+                            base_asset = market_upper[:3] # e.g., BTC
+                            quote_asset = market_upper[3:] # e.g., USDC
+
+                            if side.lower() == 'sell':
+                                # Borrowing BASE asset (e.g., BTC)
+                                new_borrow_value_usd = quantity_float * current_price
+                                calculation_note = f" (Estimating borrow of {quantity_float} {base_asset} @ ${current_price:.2f})"
+                            elif side.lower() == 'buy':
+                                # Borrowing QUOTE asset (e.g., USDC) - estimate worst case (full cost)
+                                estimated_cost = quantity_float * limit_price_float # Use limit price as estimate
+                                # Need to estimate how much USDC is actually borrowed (cost - available USDC)
+                                # This is complex without fetching USDC balance. Simple approach: assume potentially borrowing full cost.
+                                new_borrow_value_usd = estimated_cost # Assume full cost is borrowed for worst-case estimate
+                                calculation_note = f" (Estimating potential borrow of up to ${estimated_cost:.2f} {quote_asset})"
+
+                            # 4. Calculate projected values
+                            projected_liabilities_usd = current_liabilities_usd + new_borrow_value_usd
+                            projected_margin_level = float('inf') # Handle division by zero
+                            if projected_liabilities_usd > 0:
+                                # Assume assets don't change instantly for this pre-check
+                                projected_margin_level = current_assets_usd / projected_liabilities_usd
+
+                            # 5. Log the estimation
+                            logger.info(f"[OCO_CMD:{cmd_id}] ESTIMATED Margin Impact{calculation_note}:")
+                            logger.info(f"[OCO_CMD:{cmd_id}]   Current Assets (USD Equiv.): ~${current_assets_usd:.2f} ({current_assets_btc} {base_asset})")
+                            logger.info(f"[OCO_CMD:{cmd_id}]   Current Liabilities (USD Equiv.): ~${current_liabilities_usd:.2f} ({current_liabilities_btc} {base_asset})")
+                            logger.info(f"[OCO_CMD:{cmd_id}]   New Potential Borrow (USD Equiv.): ~${new_borrow_value_usd:.2f}")
+                            logger.info(f"[OCO_CMD:{cmd_id}]   Projected Liabilities (USD Equiv.): ~${projected_liabilities_usd:.2f}")
+                            logger.info(f"[OCO_CMD:{cmd_id}]   Current Margin Level (Reported): {current_margin_level or 'N/A'}")
+                            logger.info(f"[OCO_CMD:{cmd_id}]   PROJECTED Margin Level (Calculated): ~{projected_margin_level:.2f}")
+                            if projected_margin_level < 1.5: # Example threshold warning
+                                logger.warning(f"[OCO_CMD:{cmd_id}] Projected Margin Level is low (< 1.5), risk of borrow denial or quick liquidation.")
+
+                        else:
+                            logger.warning(f"[OCO_CMD:{cmd_id}] Could not get ticker price for {market_upper} to estimate margin level.")
+
+                    else:
+                        error_msg = account_summary.get("msg", "Unknown error") if isinstance(account_summary, dict) else "Invalid response"
+                        logger.warning(f"[OCO_CMD:{cmd_id}] Could not fetch margin account details for estimation: {error_msg}")
+
+                except Exception as e:
+                    logger.error(f"[OCO_CMD:{cmd_id}] Error during margin level estimation: {e}", exc_info=True)
+            # --- End of Estimation Block ---
+            """
+
+            logger.info(f"[OCO_CMD:{cmd_id}] User confirmed order, proceeding to execution")
+            # Process the order
+            response = await self.binance_service.place_oco_order(
+                symbol=market.upper(),
+                side=side,
+                quantity=quantity_float,
+                price=limit_price_float,
+                stop_price=stop_price_float,
+                stop_limit_price=stop_limit_price_float,
+                auto_borrow=auto_borrow
+            )
+            
+            # Handle response
+            if isinstance(response, dict) and not response.get("error", False):
+                order_data = response.get("data", {})
+                order_list_id = order_data.get("orderListId", "unknown")
+                logger.info(f"[OCO_CMD:{cmd_id}] Order successfully placed with OrderListId: {order_list_id}")
+            
+                # Create embed
+                embed = discord.Embed(
+                    title=f"✅ OCO {side.upper()} Order Placed",
+                    description=f"OCO order placed successfully for {market.upper()}",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now()
+                )
+                
+                # Add fields with order details
+                embed.add_field(name="Market", value=market.upper(), inline=True)
+                embed.add_field(name="Side", value=side.upper(), inline=True)
+                embed.add_field(name="Quantity", value=str(quantity_float), inline=True)
+                embed.add_field(name="Limit Price", value=f"${limit_price_float}", inline=True)
+                embed.add_field(name="Stop Price", value=f"${stop_price_float}", inline=True)
+                
+                if stop_limit_price_float:
+                    embed.add_field(name="Stop Limit Price", value=f"${stop_limit_price_float}", inline=True)
+                
+                # Add order IDs if available
+                if "orderListId" in order_data:
+                    embed.add_field(name="Order List ID", value=f"`{order_data['orderListId']}`", inline=False)
+                
+                if "orders" in order_data and isinstance(order_data["orders"], list):
+                    for i, order in enumerate(order_data["orders"]):
+                        if "orderId" in order:
+                            embed.add_field(name=f"Order {i+1} ID", value=f"`{order['orderId']}`", inline=True)
+                
+                # Send the embed
+                message = await ctx.send(embed=embed)
+                
+                # Add clipboard reaction if we have an order list ID
+                if "orderListId" in order_data:
+                    await message.add_reaction("📋")
+                    # Register with reaction handler
+                    self.reaction_handler.register_message(message.id, str(order_data["orderListId"]))
+                    
+            else:
+                # Handle error
+                error_msg = response.get("msg", "Unknown error") if isinstance(response, dict) else str(response)
+                await ctx.send(f"❌ Failed to place OCO order: {error_msg}")
+                
+        except Exception as e:
+            logger.exception(f"Error handling OCO order: {str(e)}")
+            await ctx.send(f"❌ An error occurred: {str(e)}")

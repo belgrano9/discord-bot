@@ -11,6 +11,7 @@ from .interactions.reaction_handler import ReactionHandler
 from .commands.order_commands import OrderCommands
 from .commands.account_commands import AccountCommands
 from .commands.market_commands import MarketCommands
+from .services.binance_service import BinanceService
 
 
 class TradingCommands(commands.Cog):
@@ -21,9 +22,10 @@ class TradingCommands(commands.Cog):
         self.bot = bot
         
         # Initialize components
+        self.binance_service = BinanceService()
         self.reaction_handler = ReactionHandler()
         self.order_commands = OrderCommands(self.reaction_handler)
-        self.account_commands = AccountCommands()
+        self.account_commands = AccountCommands(self.binance_service)
         self.market_commands = MarketCommands()
         
         logger.info("Trading commands initialized")
@@ -174,19 +176,74 @@ class TradingCommands(commands.Cog):
             order_type, price_or_size, size_or_funds, auto_borrow # Pass the manually parsed values
         )
 
+    @commands.command(name="oco")
+    async def oco_order(
+        self,
+        ctx,
+        market: Optional[str] = None,
+        side: Optional[str] = None,
+        quantity: Optional[str] = None,
+        limit_price: Optional[str] = None,
+        stop_price: Optional[str] = None,
+        stop_limit_price: Optional[str] = None,
+        auto_borrow: bool = False
+    ):
+        """
+        Create a One-Cancels-the-Other (OCO) order on Binance
+        
+        Parameters:
+        market: Trading pair (e.g., BTCUSDT)
+        side: 'buy' or 'sell'
+        quantity: Amount to trade
+        limit_price: Price for the limit order portion
+        stop_price: Trigger price for the stop order portion
+        stop_limit_price: Optional limit price for the stop (for stop-limit orders)
+        auto_borrow: Whether to enable auto-borrowing (True/False)
+        
+        Examples:
+        !oco BTCUSDT buy 0.001 50000 49000        (OCO with market stop)
+        !oco BTCUSDT sell 0.001 52000 49000 48500 (OCO with stop-limit)
+        !oco BTCUSDT sell 0.001 50000 48000 True  (OCO with auto-borrowing)
+        """
 
 
+        # Add this before calling the API
+        logger.info(f"[OCO_ORDER] Final parameter values:")
+        logger.info(f"  symbol          : {market}")
+        logger.info(f"  side            : {side}")
+        logger.info(f"  quantity        : {quantity}")
+        logger.info(f"  stop_price      : {stop_price}")
+        logger.info(f"  stop_limit_price: {stop_limit_price}")
+        logger.info(f"  auto_borrow     : {auto_borrow}")
 
 
+        await self.order_commands.handle_oco_order(
+            ctx, market, side, quantity, limit_price, 
+            stop_price, stop_limit_price, auto_borrow
+        )
+
+    @commands.command(name="balance", aliases=['bal'])
+    @commands.cooldown(1, 10, commands.BucketType.user)
+    async def balance(self, ctx):
+        """Displays your Binance Cross Margin account balance summary."""
+        logger.debug(f"Balance command invoked by {ctx.author}")
+        await self.account_commands.handle_balance(ctx) # Delegate
 
 
+    # --- Add Open Orders Command ---
+    @commands.command(name="openorders", aliases=['oo', 'open']) # Added aliases
+    @commands.cooldown(1, 5, commands.BucketType.user) # Cooldown: 1 use per 5 sec per user
+    async def open_orders(self, ctx, symbol: Optional[str] = None):
+        """
+        Displays your currently open Binance Margin orders.
 
-
-
-
-
-
-
+        Optionally filters by symbol (e.g., !openorders BTCUSDT).
+        Requires the 'Trading-Authorized' role.
+        """
+        logger.debug(f"Open orders command invoked by {ctx.author} for symbol: {symbol}")
+        # Convert symbol to uppercase if provided before passing
+        symbol_upper = symbol.upper() if symbol else None
+        await self.account_commands.handle_open_orders(ctx, symbol_upper) # Delegate
 
     @commands.Cog.listener()
     async def on_reaction_add(self, reaction, user):

@@ -134,46 +134,187 @@ class BinanceService:
         except Exception as e:
             logger.error(f"Error placing stop order: {str(e)}")
             return {"error": True, "msg": f"Error placing stop order: {str(e)}"}
-
-
-
-    async def cancel_order(self, order_id: str, symbol: str) -> Tuple[bool, str]:
+    
+    
+    async def place_oco_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        price: float,
+        stop_price: float,
+        stop_limit_price: Optional[float] = None,
+        is_isolated: bool = False,
+        auto_borrow: bool = False
+    ) -> Dict[str, Any]:
         """
-        Cancel an order by ID.
+        Place a One-Cancels-the-Other (OCO) order on Binance.
         
         Args:
-            order_id: Order ID to cancel
-            symbol: Trading pair symbol (required by Binance)
+            symbol: Trading pair symbol (e.g., BTCUSDT)
+            side: 'buy' or 'sell'  
+            quantity: Quantity to trade
+            price: Limit order price
+            stop_price: Stop trigger price
+            stop_limit_price: Price for stop limit (if None, uses market stop)
+            is_isolated: Whether to use isolated margin
+            auto_borrow: Whether to enable auto-borrowing
             
         Returns:
-            Tuple of (success, message)
+            Dictionary containing the OCO order response
+        """
+        order_id = f"oco_{uuid.uuid4().hex[:8]}"  # Generate short ID for logging
+        logger.info(f"[OCO:{order_id}] Processing new OCO order request: {symbol} {side} quantity={quantity}")
+    
+        try:
+            # Generate client order IDs
+            list_client_order_id = uuid.uuid4().hex
+            limit_client_order_id = uuid.uuid4().hex
+            stop_client_order_id = uuid.uuid4().hex
+                        
+            logger.debug(f"[OCO:{order_id}] Generated client IDs: list={list_client_order_id}, limit={limit_client_order_id}, stop={stop_client_order_id}")
+            
+            # Determine side effect type based on auto_borrow
+            side_effect_type = "AUTO_BORROW_REPAY" if auto_borrow else "NO_SIDE_EFFECT"
+            logger.debug(f"[OCO:{order_id}] Side effect type: {side_effect_type} (auto_borrow={auto_borrow})")
+            
+            # Prepare params for the OCO order
+            params = {
+                "symbol": symbol,
+                "side": side.upper(),
+                "quantity": quantity,
+                "price": price,
+                "stop_price": stop_price,
+                "is_isolated": is_isolated,
+                "list_client_order_id": list_client_order_id,
+                "limit_client_order_id": limit_client_order_id,
+                "stop_client_order_id": stop_client_order_id,
+                "side_effect_type": side_effect_type
+            }
+            
+            # Add stop limit price if provided
+            if stop_limit_price:
+                params["stop_limit_price"] = stop_limit_price
+                params["stop_limit_time_in_force"] = "GTC"
+                
+            logger.debug(f"[OCO:{order_id}] Request parameters prepared: {params}")
+        
+            # Call the API to create the OCO order
+            logger.info(f"[OCO:{order_id}] Calling API method create_margin_oco_order")
+            response = await self.api.create_margin_oco_order(**params)
+            
+            if not response.get("error", False):
+                order_data = response.get("data", {})
+                order_list_id = order_data.get("orderListId", "unknown")
+                logger.info(f"[OCO:{order_id}] Order successfully placed! OrderListId: {order_list_id}")
+                
+                # Log individual orders if available
+                if "orders" in order_data and isinstance(order_data["orders"], list):
+                    for i, order in enumerate(order_data["orders"]):
+                        logger.info(f"[OCO:{order_id}] Sub-order {i+1}: ID={order.get('orderId')}, type={order.get('type')}")
+            else:
+                error_msg = response.get("msg", "Unknown error")
+                logger.error(f"[OCO:{order_id}] Order placement failed: {error_msg}")
+                logger.debug(f"[OCO:{order_id}] Full error response: {response}")
+            
+            return response
+            
+        except Exception as e:
+            logger.exception(f"[OCO:{order_id}] Unexpected error placing OCO order: {str(e)}")
+            return {"error": True, "msg": f"Error placing OCO order: {str(e)}"}
+
+
+    async def get_cross_margin_account_summary(self) -> Dict[str, Any]:
+        """Fetches and parses key cross margin account details for estimation."""
+        try:
+            logger.debug("Fetching cross margin account details...")
+            # This returns the {'code': ..., 'data': {...}} structure from AsyncBinanceConnectorAPI
+            full_api_response_wrapped = await self.api.get_margin_account()
+            api_response_wrapped = full_api_response_wrapped["data"]["data"]
+            if full_api_response_wrapped:
+                # (Remove or change back the forced log level)
+                logger.debug(f"Content of actual_account_data to be parsed: {api_response_wrapped}")
+
+                # --- Parse directly from the 'actual_account_data' variable ---
+                margin_level_str = api_response_wrapped.get('marginLevel')
+                total_asset_btc_str = api_response_wrapped.get('totalAssetOfBtc')
+                total_liability_btc_str = api_response_wrapped.get('totalLiabilityOfBtc')
+                total_net_asset_btc_str = api_response_wrapped.get('totalNetAssetOfBtc')
+
+                # --- Check if parsing worked ---
+                if margin_level_str and total_asset_btc_str and total_liability_btc_str:
+                    try:
+                        summary = {
+                            "error": False,
+                            "current_margin_level": float(margin_level_str),
+                            "total_asset_btc": float(total_asset_btc_str),
+                            "total_liability_btc": float(total_liability_btc_str),
+                            "total_net_asset_btc": float(total_net_asset_btc_str) if total_net_asset_btc_str else None,
+                        }
+                        logger.info(f"Parsed margin summary: {summary}")
+                        return summary
+                    except (ValueError, TypeError) as parse_err:
+                        logger.error(f"Error parsing margin account numeric fields: {parse_err}")
+                        return {"error": True, "msg": "Failed to parse account data fields"}
+                else:
+                    # Log what was actually found (or None)
+                    logger.warning(f"Values found in actual_account_data: marginLevel='{margin_level_str}', totalAssetOfBtc='{total_asset_btc_str}', totalLiabilityOfBtc='{total_liability_btc_str}'")
+                    missing = [k for k, v in {
+                        'marginLevel': margin_level_str,
+                        'totalAssetOfBtc': total_asset_btc_str,
+                        'totalLiabilityOfBtc': total_liability_btc_str
+                        }.items() if not v]
+                    logger.warning(f"Missing required fields ({', '.join(missing)}) in actual account data part of margin response.")
+                    return {"error": True, "msg": f"Missing required fields ({', '.join(missing)}) in account response data"}
+            else:
+                # If actual_account_data is still None after checks
+                logger.error(f"Could not determine account data structure from response: {full_api_response_wrapped}")
+                return {"error": True, "msg": "Invalid or unrecognized structure in account response"}
+
+        except Exception as e:
+            logger.exception(f"Unexpected error in get_cross_margin_account_summary: {e}")
+            return {"error": True, "msg": f"Service error fetching account summary: {str(e)}"}
+
+
+    async def get_open_orders(self, symbol: Optional[str] = None, is_isolated: Optional[bool] = None) -> Dict[str, Any]:
+        """
+        Fetch open margin orders from the Binance API.
+
+        Args:
+            symbol: Optional symbol filter.
+            is_isolated: Optional isolated margin filter.
+
+        Returns:
+            A dictionary containing the list of orders under the 'data' key on success,
+            or an error dictionary {'error': True, 'msg': ...} on failure.
         """
         try:
-            # Binance requires symbol for cancellation
-            result = await self.api.cancel_order(
-                symbol=symbol,
-                order_id=int(order_id)
-            )
-            
-            if not result.get("error", False):
-                return True, f"Order {order_id} cancelled successfully"
+            logger.debug(f"Service call: get_open_orders(symbol={symbol}, is_isolated={is_isolated})")
+            # Call the corresponding method in the API connector layer
+            response = await self.api.get_open_margin_orders(symbol=symbol, is_isolated=is_isolated)
+
+            # The API layer already standardizes the response format
+            if response.get("error"):
+                logger.warning(f"Error fetching open orders via service: {response.get('msg')}")
+                return response # Return the error dict directly
             else:
-                error_msg = result.get("msg", "Unknown error")
-                return False, f"Failed to cancel order: {error_msg}"
-                
+                logger.info(f"Service successfully retrieved open orders data.")
+                return response # Return the success dict {'code': ..., 'data': [...]}
+
         except Exception as e:
-            logger.error(f"Error cancelling order {order_id}: {str(e)}")
-            return False, f"Error cancelling order: {str(e)}"
-    
+            logger.exception(f"Unexpected error in BinanceService.get_open_orders: {e}")
+            return {"error": True, "msg": f"Service layer error fetching open orders: {str(e)}"}
+
     def _format_timestamp(self, timestamp_ms: Optional[int]) -> Optional[str]:
         """Format a timestamp in milliseconds to a readable string"""
+        # Ensure this helper is still here if needed for formatting below
         if not timestamp_ms:
             return None
-            
         try:
-            from datetime import datetime
+            from datetime import datetime, timezone # Make sure timezone is imported if using UTC
             timestamp_sec = int(timestamp_ms) / 1000  # Convert ms to seconds
-            dt = datetime.fromtimestamp(timestamp_sec)
-            return dt.strftime("%Y-%m-%d %H:%M:%S")
-        except:
+            dt = datetime.fromtimestamp(timestamp_sec, tz=timezone.utc) # Assume UTC
+            return dt.strftime("%Y-%m-%d %H:%M:%S %Z") # Example format
+        except Exception as e:
+            logger.warning(f"Could not format timestamp {timestamp_ms}: {e}")
             return str(timestamp_ms)

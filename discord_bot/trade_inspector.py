@@ -248,7 +248,49 @@ class TradeInspector(commands.Cog):
             logger.error(f"Error monitoring stop orders: {str(e)}")
             await ctx.send(f"❌ Error monitoring stop orders: {str(e)}")
 
-
+    @commands.command(name="last_binance_trades")
+    async def last_binance_trades(self, ctx, symbol: Optional[str] = "BTCUSDC", limit: int = 10):
+        """
+        Fetch and display recent trades from Binance
+        
+        Parameters:
+        symbol: Trading pair (optional, e.g., BTCUSDC)
+        limit: Number of trades to retrieve (default: 10)
+        """
+        try:
+            # Show processing message
+            processing_msg = await ctx.send(f"⏳ Retrieving latest {limit} trades for {symbol}...")
+            
+            # Create Binance API service
+            binance_service = BinanceService()
+            
+            # Get recent trades
+            trades = await binance_service.get_recent_trades(symbol, limit)
+            
+            if not trades:
+                await processing_msg.edit(content=f"No recent trades found for {symbol}.")
+                return
+            
+            # Create embed for displaying trades
+            embed = discord.Embed(
+                title=f"Recent Trades for {symbol}",
+                color=discord.Color.blue(),
+            )
+            
+            # Add trade details to embed
+            for i, trade in enumerate(trades[:min(5, len(trades))]):
+                embed.add_field(
+                    name=f"Trade #{i+1}",
+                    value=f"Side: {trade.side}\nPrice: ${trade.price:.8f}\nSize: {trade.size:.8f}\nTotal: ${trade.total_value:.2f}",
+                    inline=False
+                )
+            
+            # Update the message with the embed
+            await processing_msg.edit(content=None, embed=embed)
+            
+        except Exception as e:
+            logger.error(f"Error in last_binance_trades: {str(e)}")
+            await ctx.send(f"❌ Error retrieving trade data: {str(e)}")
 
 async def setup(bot):
     """Add the TradeInspector cog to the bot"""
