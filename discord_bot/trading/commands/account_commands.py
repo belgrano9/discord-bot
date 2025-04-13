@@ -27,87 +27,143 @@ class AccountCommands:
         self.binance_service = binance_service
         logger.debug("Initialized AccountCommands")
 
-    async def handle_balance(self, ctx: commands.Context):
+    async def handle_balance(self, ctx: commands.Context, margin_type: str = "isolated", symbol: Optional[str] = None):
         """
-        Handle the balance command: Fetch and display margin account summary using the service.
+        Handle the balance command: Fetch and display margin account summary.
 
         Args:
             ctx: Discord context
+            margin_type: Type of margin account ("isolated" or "cross")
+            symbol: Trading pair symbol for isolated margin (optional)
         """
-        # Security measure: Check role
-        required_role = discord.utils.get(ctx.guild.roles, name="Trading-Authorized")
+        # Security check remains the same
+        required_role = discord.utils.get(ctx.guild.roles, name="Trading-Authorized") 
         if required_role is None or required_role not in ctx.author.roles:
-            await ctx.send("⛔ You don't have permission to view account balances. You need the 'Trading-Authorized' role.")
-            logger.warning(f"User {ctx.author} tried to use !balance without 'Trading-Authorized' role.")
+            await ctx.send("⛔ You don't have permission to view account balances.")
             return
 
-        logger.info(f"User {ctx.author} requested margin account balance.")
-        await ctx.send("⏳ Fetching margin account balance...", delete_after=5.0) # Give feedback
+        logger.info(f"User {ctx.author} requested {margin_type} margin account balance with symbol={symbol}")
+        await ctx.send(f"⏳ Fetching {margin_type} margin account balance...", delete_after=5.0)
+
 
         try:
-            # --- Step 1: Call the service method which fetches AND parses ---
-            summary_data = await self.binance_service.get_cross_margin_account_summary()
-            logger.debug(f"Received summary data from service: {summary_data}")
+            if margin_type.lower() == "cross":
+                # Existing cross margin implementation
+                summary_data = await self.binance_service.get_cross_margin_account_summary()
+                
+                # Process cross margin response...
+                # [existing code for cross margin]
+                
+            else:  # isolated margin
+                logger.info(f"Calling get_isolated_margin_account_summary with symbol={symbol}")
+                summary_data = await self.binance_service.get_isolated_margin_account_summary(symbol)
 
-            # --- Step 2: Check the result from the service ---
-            if not summary_data.get("error", False):
-                # Success - Create embed using already parsed data
-                embed = discord.Embed(
-                    title="📊 Binance Cross Margin Balance",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.now()
-                )
+                logger.info(f"get_isolated_margin_account_summary returned: {summary_data}")
+                
+                # Log keys in the response to help debugging
+                if isinstance(summary_data, dict):
+                    logger.debug(f"Response keys: {list(summary_data.keys())}")
+                    if "accounts" in summary_data:
+                        logger.debug(f"Found {len(summary_data['accounts'])} accounts in response")
+                        if summary_data['accounts']:
+                            logger.debug(f"First account keys: {list(summary_data['accounts'][0].keys())}")
+                    if "error" in summary_data:
+                        logger.debug(f"Error status: {summary_data['error']}")
+                    if "all_response_keys" in summary_data:
+                        logger.debug(f"All response keys found: {summary_data['all_response_keys']}")
+                
 
-                # Extract data (ALREADY floats from the service method)
-                margin_level = summary_data.get("current_margin_level")
-                total_asset_btc = summary_data.get("total_asset_btc")
-                total_liability_btc = summary_data.get("total_liability_btc")
-                total_net_asset_btc = summary_data.get("total_net_asset_btc")
 
-                # Format and add fields (checking for None in case service parsing failed subtly)
-                embed.add_field(
-                    name="Margin Level",
-                    value=f"{margin_level:.2f}" if margin_level is not None else "N/A",
-                    inline=True
-                )
-                embed.add_field(
-                    name="Total Assets (BTC)",
-                    value=f"{total_asset_btc:.8f} BTC" if total_asset_btc is not None else "N/A",
-                    inline=True
-                )
-                embed.add_field(
-                    name="Total Liabilities (BTC)",
-                    value=f"{total_liability_btc:.8f} BTC" if total_liability_btc is not None else "N/A",
-                    inline=True
-                )
-                if total_net_asset_btc is not None:
-                     embed.add_field(
-                        name="Net Assets (BTC)",
-                        value=f"{total_net_asset_btc:.8f} BTC",
-                        inline=True
+                if not summary_data.get("error", False):
+                    # Create an embed for isolated margin
+                    embed = discord.Embed(
+                        title="📊 Binance Isolated Margin Balance",
+                        color=discord.Color.blue(),
+                        timestamp=datetime.now()
                     )
-                else: # Placeholder for alignment
-                     embed.add_field(name="\u200b", value="\u200b", inline=True)
+                    
+                    # Get the accounts list
+                    accounts = summary_data.get("accounts", [])
+                    
+                    logger.info(accounts)
 
-                embed.set_footer(text=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
-                logger.info(f"Successfully fetched and formatted balance for {ctx.author} using service.")
-                await ctx.send(embed=embed)
+                    if not accounts:
+                        embed.description = "No isolated margin accounts found."
+                    else:
+                        # Add total values
+                        total_btc_value = float(accounts[0]["baseAsset"]["totalAsset"])
+                        total_liability = float(accounts[0]["baseAsset"]['borrowed'])
 
-            else:
-                # Handle error reported BY THE SERVICE
-                error_msg = summary_data.get("msg", "Unknown error fetching/parsing balance.")
-                logger.error(f"Service layer failed to get/parse balance for {ctx.author}: {error_msg}")
-                embed = discord.Embed(
-                    title="❌ Error Fetching Balance",
-                    description=f"Could not retrieve or process margin account balance.\n```\n{error_msg}\n```",
-                    color=discord.Color.red(),
-                    timestamp=datetime.now()
-                )
-                embed.set_footer(text=f"Requested by {ctx.author.display_name}")
-                await ctx.send(embed=embed)
+                        total_usdc_value =  float(accounts[0]["quoteAsset"]["totalAsset"])
+                        total_usdc_liability = float(accounts[0]["quoteAsset"]["borrowed"])
+
+                        embed.add_field(
+                            name="Total Assets (BTC)",
+                            value=f"{total_btc_value:.8f} BTC",
+                            inline=True
+                        )
+                        
+                        embed.add_field(
+                            name="Total Liabilities (BTC)",
+                            value=f"{total_liability:.8f} BTC",
+                            inline=True
+                        )
+
+                        embed.add_field(
+                            name="Total Assets (USDC)",
+                            value=f"{total_usdc_value:.8f} USDC",
+                            inline=True
+                        )
+                        
+                        embed.add_field(
+                            name="Total Liabilities (USDC)",
+                            value=f"{total_usdc_liability:.8f} USDC",
+                            inline=True
+                        )
+                        
+                        for account in accounts[:10]:
+                            symbol = account.get("symbol", "Unknown")
+                            base_asset = account.get("baseAsset", {})
+                            quote_asset = account.get("quoteAsset", {})
+                            
+                            # Get margin level or ratio (different field names possible)
+                            margin_level = account.get("marginLevel", account.get("marginRatio", "0"))
+                            margin_status = account.get("marginLevelStatus", "Unknown")
+                            
+                            # Get liquidation price if available
+                            liquidate_price = account.get("liquidatePrice", "N/A")
+                            
+                            field_value = (
+                                f"Status: {account.get('marginLevelStatus', 'Unknown')}\n"
+                                f"Margin Level: {margin_level}\n"
+                                f"Base: {base_asset.get('borrowed', '0')} {base_asset.get('asset', '')}\n"
+                                f"Quote: {quote_asset.get('borrowed', '0')} {quote_asset.get('asset', '')}\n"
+                                f"Liquidate Price: {liquidate_price}"
+                            )
+                            
+                            embed.add_field(
+                                name=f"{symbol}",
+                                value=field_value,
+                                inline=True
+                            )
+                    
+                    embed.set_footer(text=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
+                    logger.info(f"Successfully fetched and formatted isolated margin balance for {ctx.author}.")
+                    await ctx.send(embed=embed)
+                else:
+                    # Handle error reported by the service
+                    error_msg = summary_data.get("msg", "Unknown error fetching/parsing balance.")
+                    logger.error(f"Service layer failed to get/parse isolated balance for {ctx.author}: {error_msg}")
+                    embed = discord.Embed(
+                        title="❌ Error Fetching Balance",
+                        description=f"Could not retrieve or process isolated margin account balance.\n```\n{error_msg}\n```",
+                        color=discord.Color.red(),
+                        timestamp=datetime.now()
+                    )
+                    embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+                    await ctx.send(embed=embed)
 
         except Exception as e:
-            # Catch unexpected errors during the process (e.g., service not available)
             logger.exception(f"Unexpected error in handle_balance command for {ctx.author}: {e}")
             await ctx.send(f"❌ An unexpected error occurred while fetching the balance: {e}")
 

@@ -6,7 +6,8 @@ Handles interaction with Binance API for orders and account data.
 import uuid
 from typing import Dict, List, Any, Optional, Tuple
 from loguru import logger
-
+import asyncio
+import json 
 from api.binance_connector import AsyncBinanceConnectorAPI
 from ..models.order import OrderRequest, OrderResponse, OrderSide, OrderType
 from ..models.account import Asset, MarginAccount, TradeInfo
@@ -275,6 +276,115 @@ class BinanceService:
             logger.exception(f"Unexpected error in get_cross_margin_account_summary: {e}")
             return {"error": True, "msg": f"Service error fetching account summary: {str(e)}"}
 
+    async def get_isolated_margin_account_summary(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """Fetches and parses key isolated margin account details."""
+        try:
+            logger.info(f"Fetching isolated margin account details for symbol: {symbol}")
+            
+            # This returns the isolated margin account data
+            response = await self.api.get_isolated_margin_account(symbols=symbol)
+            logger.debug(f"API response type: {type(response)}")
+            logger.debug(f"API response structure: {json.dumps(response, indent=2) if response else 'None'}")
+            
+            # Check for API error
+            if response.get("error", False):
+                logger.error(f"API returned error: {response.get('msg')}")
+                return {"error": True, "msg": response.get("msg", "Unknown error fetching isolated margin account")}
+            
+            # Log response structure to understand what we're working with
+            has_data_key = "data" in response
+            data_type = type(response.get("data", None)).__name__
+            has_assets_in_data = False
+            has_assets_in_root = False
+            
+            if has_data_key and isinstance(response["data"], dict):
+                has_assets_in_data = "assets" in response["data"]
+                logger.debug(f"Response has 'data' key: {has_data_key}, with type: {data_type}")
+                logger.debug(f"Response has 'assets' in data: {has_assets_in_data}")
+                if has_assets_in_data:
+                    logger.debug(f"Number of assets in data: {len(response['data'].get('assets', []))}")
+            
+            has_assets_in_root = "assets" in response
+            logger.debug(f"Response has 'assets' in root: {has_assets_in_root}")
+            if has_assets_in_root:
+                logger.debug(f"Number of assets in root: {len(response.get('assets', []))}")
+            
+            # Try to find assets in all possible locations
+            account_data = []
+            if has_data_key and isinstance(response["data"], dict):
+                if "assets" in response["data"]:
+                    account_data = response["data"]["assets"]
+                    logger.debug("Found assets in response['data']['assets']")
+                elif "data" in response["data"] and isinstance(response["data"]["data"], dict):
+                    if "assets" in response["data"]["data"]:
+                        account_data = response["data"]["data"]["assets"]
+                        logger.debug("Found assets in response['data']['data']['assets']")
+            elif "assets" in response:
+                account_data = response["assets"]
+                logger.debug("Found assets in response['assets']")
+            
+            # If still not found, extract raw response if available for debugging
+            if not account_data and "raw_response" in response:
+                logger.debug(f"Examining raw_response: {json.dumps(response['raw_response'], indent=2)}")
+                if isinstance(response["raw_response"], dict):
+                    if "assets" in response["raw_response"]:
+                        account_data = response["raw_response"]["assets"]
+                        logger.debug("Found assets in raw_response")
+                
+            # Check if we found any data
+            if not account_data:
+                all_keys = set()
+                
+                def collect_keys(d, prefix=""):
+                    if isinstance(d, dict):
+                        for k, v in d.items():
+                            all_keys.add(f"{prefix}.{k}" if prefix else k)
+                            collect_keys(v, f"{prefix}.{k}" if prefix else k)
+                    elif isinstance(d, list) and d:
+                        collect_keys(d[0], f"{prefix}[0]")
+                
+                collect_keys(response)
+                logger.error(f"No isolated margin account data found. All keys in response: {sorted(all_keys)}")
+                return {"error": True, "msg": "No isolated margin account data found", "all_response_keys": sorted(all_keys)}
+            
+            logger.info(f"Found {len(account_data)} isolated margin accounts")
+            
+            # Extract the totalAssetOfBtc values (could be in different locations)
+            total_asset = "0"
+            total_liability = "0"
+            total_net_asset = "0"
+            
+            # Try different locations
+            if has_data_key and isinstance(response["data"], dict):
+                total_asset = response["data"].get("totalAssetOfBtc", "0")
+                total_liability = response["data"].get("totalLiabilityOfBtc", "0")
+                total_net_asset = response["data"].get("totalNetAssetOfBtc", "0")
+            else:
+                total_asset = response.get("totalAssetOfBtc", "0")
+                total_liability = response.get("totalLiabilityOfBtc", "0")
+                total_net_asset = response.get("totalNetAssetOfBtc", "0")
+            
+            # Create summary with all the data we found
+            summary = {
+                "error": False,
+                "accounts": account_data,
+                "total_asset_of_btc": total_asset,
+                "total_liability_of_btc": total_liability,
+                "total_net_asset_of_btc": total_net_asset,
+            }
+            
+            logger.debug(f"Returning account summary with {len(account_data)} accounts")
+            return summary
+            
+        except Exception as e:
+            logger.exception(f"Unexpected error in get_isolated_margin_account_summary: {e}")
+            import traceback
+            return {
+                "error": True, 
+                "msg": f"Service error fetching isolated account summary: {str(e)}",
+                "traceback": traceback.format_exc()
+            }
+   
 
     async def get_open_orders(self, symbol: Optional[str] = None, is_isolated: Optional[bool] = None) -> Dict[str, Any]:
         """
@@ -305,6 +415,71 @@ class BinanceService:
             logger.exception(f"Unexpected error in BinanceService.get_open_orders: {e}")
             return {"error": True, "msg": f"Service layer error fetching open orders: {str(e)}"}
 
+    async def cancel_all_margin_orders(
+        self,
+        symbol: str,
+        is_isolated: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Cancel all open margin orders for a specific symbol.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., BTCUSDT)
+            is_isolated: Whether to cancel isolated margin orders
+            
+        Returns:
+            API response including cancelled orders
+        """
+        try:
+            # First, check if there are any open orders for this symbol
+            logger.info(f"Checking for open {symbol} margin orders (isolated={is_isolated})")
+            open_orders = await self.get_open_orders(symbol=symbol, is_isolated=is_isolated)
+            
+            # If no orders or error getting orders, return appropriate response
+            if open_orders.get("error", False):
+                logger.warning(f"Error checking open orders: {open_orders.get('msg')}")
+                return open_orders
+            
+            open_orders_list = open_orders.get("data", [])
+            if not open_orders_list or len(open_orders_list) == 0:
+                logger.info(f"No open {symbol} margin orders to cancel")
+                return {"code": "200000", "data": [], "msg": "No open orders to cancel"}
+            
+            # Prepare parameters
+            params = {
+                "symbol": symbol,
+            }
+            
+            # Add isIsolated parameter only for isolated margin
+            if is_isolated:
+                params["isIsolated"] = "TRUE"
+            
+            logger.debug(f"Calling method 'margin_open_orders_cancellation' with params: {params}")
+            
+            # The method exists but might not be properly accessible through _run_client_method
+            # Let's try to directly access the client object's method
+            try:
+                # Get direct reference to the client object
+                client = self.api.client.client
+                
+                # Call the method directly on the client
+                if hasattr(client, 'margin_open_orders_cancellation'):
+                    response = await asyncio.to_thread(client.margin_open_orders_cancellation, **params)
+                    logger.debug(f"Direct method call response: {response}")
+                    
+                    return {"code": "200000", "data": response}
+                else:
+                    logger.error(f"Method 'margin_open_orders_cancellation' not found on client object")
+                    return {"error": True, "msg": "API method not available on client object"}
+                    
+            except Exception as api_error:
+                logger.error(f"Direct API method error: {str(api_error)}")
+                return {"error": True, "msg": f"API method error: {str(api_error)}"}
+                
+        except Exception as e:
+            logger.exception(f"Unexpected error in cancel_all_margin_orders: {str(e)}")
+            return {"error": True, "msg": f"Service error: {str(e)}"}
+   
     def _format_timestamp(self, timestamp_ms: Optional[int]) -> Optional[str]:
         """Format a timestamp in milliseconds to a readable string"""
         # Ensure this helper is still here if needed for formatting below

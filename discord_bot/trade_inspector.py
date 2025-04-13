@@ -64,7 +64,7 @@ class TradeInspector(commands.Cog):
                 price=None,  # Not needed for market order
                 use_funds=False,
                 auto_borrow=auto_borrow,
-                is_isolated=False  # Using cross margin
+                is_isolated=True  # Using cross margin
             )
             
             # Place the market order
@@ -117,7 +117,7 @@ class TradeInspector(commands.Cog):
                 price=tp,
                 stop_price=sl,
                 stop_limit_price=None,  # Using market stops
-                is_isolated=False,  # Using cross margin
+                is_isolated=True,  # Using cross margin
                 auto_borrow=auto_borrow
             )
             

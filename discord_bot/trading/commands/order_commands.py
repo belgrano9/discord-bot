@@ -754,3 +754,126 @@ class OrderCommands:
             logger.exception(f"Error handling OCO order: {str(e)}")
             await ctx.send(f"❌ An error occurred: {str(e)}")
 
+    async def handle_cancel_all_orders(
+        self,
+        ctx: commands.Context,
+        symbol: str,
+        is_isolated: bool = False
+    ) -> None:
+        """
+        Handle cancelling all open margin orders for a symbol.
+        
+        Args:
+            ctx: Discord context
+            symbol: Trading pair symbol (e.g., BTCUSDC)
+            is_isolated: Whether to cancel isolated margin orders (default: False for cross margin)
+        """
+        # Security check: only users with Trading-Authorized role can cancel orders
+        required_role = discord.utils.get(ctx.guild.roles, name="Trading-Authorized")
+        if required_role is None or required_role not in ctx.author.roles:
+            await ctx.send("⛔ You don't have permission to cancel orders. You need the 'Trading-Authorized' role.")
+            logger.warning(f"User {ctx.author} tried to use !cancelall without 'Trading-Authorized' role.")
+            return
+        
+        # Symbol validation
+        if not symbol:
+            await ctx.send("❌ A trading pair symbol is required (e.g., BTCUSDC)")
+            return
+        
+        # Get confirmation from user
+        margin_type = "Isolated" if is_isolated else "Cross"
+        confirmed = await self.input_manager.confirm_action(
+            ctx,
+            title="⚠️ Confirm Cancellation",
+            description=f"You are about to cancel ALL open {margin_type} margin orders for **{symbol}**.\n\nThis action cannot be undone.",
+            color=discord.Color.red(),
+            use_reactions=True
+        )
+        
+        if not confirmed:
+            await ctx.send("🛑 Cancellation aborted.")
+            return
+        
+        # Send processing message
+        processing_msg = await ctx.send(f"⏳ Cancelling all {margin_type} margin orders for {symbol}...")
+        
+        try:
+            # Call the binance service to cancel all orders
+            response = await self.binance_service.cancel_all_margin_orders(
+                symbol=symbol,
+                is_isolated=is_isolated
+            )
+            
+            # Check if the cancellation was successful
+            if not response.get("error", False):
+                # Extract the response data
+                cancelled_data = response.get("data", {})
+                
+                # Count how many orders were cancelled
+                cancelled_count = 0
+                if isinstance(cancelled_data, list):
+                    cancelled_count = len(cancelled_data)
+                elif isinstance(cancelled_data, dict):
+                    # Sometimes the API returns a dict with a count
+                    cancelled_count = cancelled_data.get("count", 0)
+                
+                # Create success embed
+                embed = discord.Embed(
+                    title="✅ Orders Cancelled",
+                    description=f"Successfully cancelled all {margin_type} margin orders for **{symbol}**.",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now()
+                )
+                
+                # Add order count
+                embed.add_field(
+                    name="Orders Cancelled",
+                    value=f"{cancelled_count} order(s)",
+                    inline=False
+                )
+                
+                # Add detailed order IDs if available and not too many
+                if isinstance(cancelled_data, list) and len(cancelled_data) > 0:
+                    if len(cancelled_data) <= 10:  # Only show details if reasonable number
+                        order_ids = []
+                        for order in cancelled_data:
+                            order_id = order.get("orderId", "Unknown")
+                            order_type = order.get("type", "Unknown")
+                            order_ids.append(f"`{order_id}` ({order_type})")
+                        
+                        embed.add_field(
+                            name="Cancelled Order IDs",
+                            value="\n".join(order_ids),
+                            inline=False
+                        )
+                    else:
+                        embed.add_field(
+                            name="Note",
+                            value=f"Cancelled {len(cancelled_data)} orders. Too many to display individual IDs.",
+                            inline=False
+                        )
+                
+                # Update the message
+                await processing_msg.edit(content=None, embed=embed)
+                
+            else:
+                # Handle error
+                error_msg = response.get("msg", "Unknown error")
+                embed = discord.Embed(
+                    title="❌ Cancellation Failed",
+                    description=f"Failed to cancel {margin_type} margin orders for **{symbol}**.",
+                    color=discord.Color.red(),
+                    timestamp=datetime.now()
+                )
+                
+                embed.add_field(
+                    name="Error Details",
+                    value=f"```\n{error_msg}\n```",
+                    inline=False
+                )
+                
+                await processing_msg.edit(content=None, embed=embed)
+                
+        except Exception as e:
+            logger.exception(f"Error cancelling {margin_type} margin orders for {symbol}: {str(e)}")
+            await processing_msg.edit(content=f"❌ An unexpected error occurred: {str(e)}")

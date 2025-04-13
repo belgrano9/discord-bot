@@ -7,7 +7,7 @@ import os
 import asyncio
 from typing import Dict, List, Any, Optional, Tuple
 from loguru import logger
-import time
+import json
 
 try:
     from binance.spot import Spot as BinanceSpot
@@ -389,29 +389,44 @@ class AsyncBinanceConnectorAPI:
             
         return {"code": "200000", "data": data}
     
-    @require_api_key
     async def get_isolated_margin_account(self, symbols: Optional[str] = None) -> Dict[str, Any]:
         """
         Get isolated margin account details.
         
         Args:
             symbols: List of trading pairs as a single string (e.g., "BTCUSDT,ETHUSDT")
-            
+                
         Returns:
             Isolated margin account information
         """
         params = {}
         if symbols:
             params["symbols"] = symbols
-            
-        response = await self.client._run_client_method('isolated_margin_account', **params)
-        success, data, error = await self._process_response(response)
         
-        if not success:
-            logger.warning(f"Failed to get isolated margin account: {error}")
-            return {"error": True, "msg": error}
+        logger.info(f"Calling Binance API for isolated margin account with params: {params}")
+        
+        try:
+            # Call the API
+            raw_response = await self.client._run_client_method('isolated_margin_account', **params)
+            logger.debug(f"Raw response type from Binance: {type(raw_response)}")
+            logger.debug(f"Raw response from Binance: {raw_response}")
             
-        return {"code": "200000", "data": data}
+            # Process response
+            success, data, error = await self._process_response(raw_response)
+            
+            if not success:
+                logger.error(f"Failed to get isolated margin account: {error}")
+                logger.error(f"Raw error response: {raw_response}")
+                return {"error": True, "msg": error, "raw_response": raw_response}
+            
+            logger.info(f"Successfully retrieved isolated margin account data")
+            logger.debug(f"Processed data structure: {json.dumps(data, indent=2) if data else 'None'}")
+            
+            # Return in standardized format
+            return {"code": "200000", "data": data}
+        except Exception as e:
+            logger.exception(f"Exception in get_isolated_margin_account: {str(e)}")
+            return {"error": True, "msg": f"Exception: {str(e)}"}
     
     # Order Methods
     

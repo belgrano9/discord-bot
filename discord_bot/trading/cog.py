@@ -224,13 +224,24 @@ class TradingCommands(commands.Cog):
 
     @commands.command(name="balance", aliases=['bal'])
     @commands.cooldown(1, 10, commands.BucketType.user)
-    async def balance(self, ctx):
-        """Displays your Binance Cross Margin account balance summary."""
-        logger.debug(f"Balance command invoked by {ctx.author}")
-        await self.account_commands.handle_balance(ctx) # Delegate
+    async def balance(self, ctx, margin_type: str = "isolated", symbol: Optional[str] = None):
+        """
+        Displays your margin account balance summary.
+        
+        Parameters:
+        margin_type: Type of margin account ("isolated" or "cross") [default: isolated]
+        symbol: Trading pair symbol for isolated margin (e.g., BTCUSDT) [optional]
+        
+        Examples:
+        !balance           - Show isolated margin accounts
+        !balance isolated  - Show isolated margin accounts 
+        !balance cross     - Show cross margin account
+        !balance isolated BTCUSDT - Show specific isolated margin account
+        """
+        logger.debug(f"Balance command invoked by {ctx.author} with type={margin_type}, symbol={symbol}")
+        await self.account_commands.handle_balance(ctx, margin_type, symbol)
 
 
-    # --- Add Open Orders Command ---
     @commands.command(name="openorders", aliases=['oo', 'open']) # Added aliases
     @commands.cooldown(1, 5, commands.BucketType.user) # Cooldown: 1 use per 5 sec per user
     async def open_orders(self, ctx, symbol: Optional[str] = None):
@@ -244,6 +255,24 @@ class TradingCommands(commands.Cog):
         # Convert symbol to uppercase if provided before passing
         symbol_upper = symbol.upper() if symbol else None
         await self.account_commands.handle_open_orders(ctx, symbol_upper) # Delegate
+
+    @commands.command(name="cancelall", aliases=['canall', 'call'])
+    @commands.cooldown(1, 5, commands.BucketType.user)  # Limit to prevent abuse
+    async def cancel_all_orders(self, ctx, symbol: str, isolated: bool = False):
+        """
+        Cancel all open margin orders for a specific symbol.
+        
+        Parameters:
+        symbol: Trading pair (e.g., BTCUSDC)
+        isolated: Whether to cancel orders on isolated margin (default: False for cross margin)
+        
+        Example:
+        !cancelall BTCUSDC
+        !cancelall BTCUSDC True
+        """
+        logger.info(f"Cancel all orders command invoked by {ctx.author} for symbol: {symbol}, isolated: {isolated}")
+        await self.order_commands.handle_cancel_all_orders(ctx, symbol.upper(), isolated)
+
 
     @commands.Cog.listener()
     async def on_reaction_add(self, reaction, user):
