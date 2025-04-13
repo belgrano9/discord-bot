@@ -753,3 +753,4 @@ class OrderCommands:
         except Exception as e:
             logger.exception(f"Error handling OCO order: {str(e)}")
             await ctx.send(f"❌ An error occurred: {str(e)}")
+

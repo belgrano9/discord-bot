@@ -5,15 +5,18 @@ Extracts and displays specific trade data from the most recent trade.
 
 import discord
 from discord.ext import commands
-from typing import Dict, Any, Optional
+from typing import Optional
 from loguru import logger
-import asyncio
+from datetime import datetime
 
 from trading.services.kucoin_service import KuCoinService
 from trading.interactions.reaction_handler import ReactionHandler
 from trading.commands.order_commands import OrderCommands
 from trading.commands.account_commands import AccountCommands
 from trading.commands.market_commands import MarketCommands
+from trading.services.binance_service import BinanceService
+from trading.models.order import OrderRequest, OrderSide, OrderType
+
 
 class TradeInspector(commands.Cog):
     """Discord cog for inspecting recent trade details"""
@@ -22,276 +25,181 @@ class TradeInspector(commands.Cog):
         """Initialize the trade inspector cog"""
         self.bot = bot
         self.kucoin_service = KuCoinService()
+        self.binance_service = BinanceService()
+
         logger.info("Trade Inspector cog initialized")
         # Initialize components
         self.reaction_handler = ReactionHandler()
         self.order_commands = OrderCommands(self.reaction_handler)
-        self.account_commands = AccountCommands()
+        self.account_commands = AccountCommands(self.binance_service)
         self.market_commands = MarketCommands()
 
-    async def inspect_last_trade(self, ctx, symbol: Optional[str] = None):
+    
+    async def full_position(self, ctx, symbol: Optional[str] = None, side: str = "buy", amount: str = "0.001", auto_borrow: bool = True, rr: Optional[float] = 1.5):
         """
-        Extract and display data from the most recent trade
-        
-        Parameters:
-        symbol: Trading pair (optional, e.g., BTC-USDT)
-        
-        Returns:
-        Tuple of (take_profit_id, stop_loss_id) or (None, None) if orders weren't created
-        """
-        try:
-            logger.info("Accessed inspect_last_trade...")
-            # Show processing message
-            processing_msg = await ctx.send("⏳ Retrieving latest trade data...")
-            
-            logger.info("Getting trades...")
-            # Get only the most recent trade
-            trades = await self.kucoin_service.get_recent_trades(symbol, limit=10)
-            margin_account = await self.kucoin_service.get_margin_account(symbol)
-
-            if not trades:
-                await processing_msg.edit(content=f"No recent trades found{' for ' + symbol if symbol else ''}.")
-                return None, None
-            
-            # Extract data from the most recent trade
-            trade = trades[0]
-            id = trade.trade_id
-            
-            # Create a concise embed with just the requested data
-            embed = discord.Embed(
-                title=f"Last Trade Details for {trade.symbol}",
-                color=discord.Color.blue(),
-            )
-            
-            # Variables Needed
-            d = {"buy": 1, "sell": -1}
-            quote_asset = margin_account.quote_asset
-            m = 102
-
-            # Fees and Risk
-            f0 = 0.001
-            ft = 0.001
-            risk = 0.01 * m
-            rr = 1.5
-
-            # Take profit & Stop Loss
-            tp = (risk * rr + trade.size * trade.price * (f0 + d[trade.side])) / (trade.size * (d[trade.side] - ft))
-            sl = (risk - trade.size * trade.price * (f0 + d[trade.side])) / (trade.size * (ft - d[trade.side]))
-
-            # Add only the requested fields
-            embed.add_field(name="Side", value=f"{trade.side}", inline=True)
-            embed.add_field(name="Price", value=f"${trade.price:.8f}", inline=True)
-            embed.add_field(name="Size", value=f"{trade.size:.8f}", inline=True)
-            embed.add_field(name="Total", value=f"${trade.total_value:.8f}", inline=True)
-            embed.add_field(name="Take Profit", value=f"${tp:.8f}", inline=True)
-            embed.add_field(name="Stop Loss", value=f"${sl:.8f}", inline=True)
-            
-            opposite_side = "buy" if trade.side == "sell" else "sell"
-
-            # Store stop order IDs
-            take_profit_id = None
-            stop_loss_id = None
-
-            # Place stop orders
-            st1 = await self.kucoin_service.place_stop_order(
-                symbol, 
-                order_type="market", 
-                side=opposite_side, 
-                stop_price=tp, 
-                stop_type="entry", 
-                size=trade.size
-            )
-            
-            st2 = await self.kucoin_service.place_stop_order(
-                symbol, 
-                order_type="market", 
-                side=opposite_side, 
-                stop_price=sl, 
-                stop_type="loss", 
-                size=trade.size
-            )
-            
-            logger.info("Placed stop orders")
-
-            # Extract order IDs if successful
-            if st1.get("code") == "200000":
-                take_profit_id = st1.get("data")
-            
-            if st2.get("code") == "200000":
-                stop_loss_id = st2.get("data")
-
-            # Add feedback on stop order placement
-            if st1.get("code") == "200000" and st2.get("code") == "200000":
-                embed.add_field(
-                    name="Stop Orders", 
-                    value="✅ Take-profit and stop-loss orders placed", 
-                    inline=False
-                )
-                
-                # Add monitoring message
-                if take_profit_id and stop_loss_id:
-                    embed.add_field(
-                        name="Monitoring", 
-                        value="✅ Auto-cancellation monitoring started", 
-                        inline=False
-                    )
-            else:
-                error_msg = "❌ Failed to place one or more stop orders"
-                embed.add_field(name="Stop Orders", value=error_msg, inline=False)
-                logger.error(f"Stop order error: TP: {st1.get('msg', 'Unknown')}, SL: {st2.get('msg', 'Unknown')}")
-            
-            # Update the message with the embed
-            await processing_msg.edit(content=None, embed=embed)
-            
-            # Start monitoring if both orders were placed successfully
-            if take_profit_id and stop_loss_id:
-                # Start in a separate task to not block
-                asyncio.create_task(
-                    self.monitor_stop_orders(ctx, take_profit_id, stop_loss_id, symbol)
-                )
-            
-            # Return the order IDs
-            return take_profit_id, stop_loss_id
-            
-        except Exception as e:
-            logger.error(f"Error in inspect_last_trade: {str(e)}")
-            await ctx.send(f"❌ Error retrieving trade data: {str(e)}")
-            return None, None
-
-    @commands.command(name="place_full_order")
-    async def place_full_order(
-        self, 
-        ctx, 
-        market: Optional[str] = None, 
-        side: Optional[str] = None, 
-        amount: Optional[str] = None, 
-        price_or_type: Optional[str] = None, 
-        order_type: str = "limit",
-        auto_borrow: bool = False
-    ):
-        """
-        Create a real order on KuCoin with direct parameters
-        
-        Usage: !realorder <market> <side> <amount> [price_or_type] [order_type] [auto_borrow]
-        
-        Examples:
-        !realorder BTC-USDT buy 0.001 50000         (limit order to buy 0.001 BTC at $50000)
-        !realorder BTC-USDT sell 0.001 market       (market order to sell 0.001 BTC)
-        !realorder BTC-USDT buy 0.05 2000           (limit order to buy 0.05 BTC at $2000)
-        !realorder BTC-USDT sell 0.05 market        (market order to sell 0.05 BTC)
-        !realorder BTC-USDT buy 100 market funds    (market order to buy $100 worth of BTC)
-        !realorder BTC-USDT sell 0.001 market True  (short sell with auto-borrowing)
-        """
-        await self.order_commands.handle_full_order(ctx, market, side, amount, price_or_type, order_type, auto_borrow)
-
-
-    async def monitor_stop_orders(self, ctx: commands.Context, take_profit_id: str, stop_loss_id: str, symbol: str):
-        """
-        Monitor two stop orders and cancel one if the other is triggered.
+        Place a full position consisting of:
+        1. A market margin order to open the position
+        2. An OCO order for take-profit and stop-loss to manage risk
         
         Args:
             ctx: Discord context
-            take_profit_id: ID of take profit order
-            stop_loss_id: ID of stop loss order
-            symbol: Trading pair symbol
+            symbol: Trading pair (e.g., BTCUSDT)
+            side: buy or sell
+            amount: Amount to trade
+            auto_borrow: Whether to enable auto-borrowing (default: True)
         """
         try:
-            # Create initial status message
-            status_msg = await ctx.send(f"⏳ Monitoring stop orders for {symbol}...")
-            
-            # Loop until one order is triggered or both are cancelled
-            while True:
-                # Get active stop orders using our new method
-                stop_orders_response = await self.kucoin_service.api.get_stop_orders(
-                    symbol=symbol,
-                    status="active",
-                    trade_type="MARGIN_ISOLATED_TRADE"
-                )
-                
-                if stop_orders_response.get("code") != "200000":
-                    await status_msg.edit(content=f"❌ Error checking stop orders: {stop_orders_response.get('msg', 'Unknown error')}")
-                    return
-                    
-                # Extract active order IDs
-                active_orders = stop_orders_response.get("data", {}).get("items", [])
-                active_order_ids = [order.get("id") for order in active_orders]
-                
-                # Check if both orders are still active
-                tp_active = take_profit_id in active_order_ids
-                sl_active = stop_loss_id in active_order_ids
-                
-                # If neither are active, both have been filled or cancelled
-                #if not tp_active and not sl_active:
-                    #await status_msg.edit(content=f"✅ Both stop orders for {symbol} have been executed or cancelled.")
-                    #return
-                    
-                # If one is missing, cancel the other
-                #if not tp_active and sl_active:
-                # Take profit was triggered, cancel stop loss
-                #result = await self.kucoin_service.api.cancel_order_by_id(stop_loss_id)
-                #await status_msg.edit(content=f"🚀 Take profit triggered! Stop loss cancelled for {symbol}.")
-                #return
-                    
-                #if tp_active and not sl_active:
-                    # Stop loss was triggered, cancel take profit
-                    #result = await self.kucoin_service.api.cancel_order_by_id(take_profit_id)
-                    #await status_msg.edit(content=f"🛑 Stop loss triggered! Take profit cancelled for {symbol}.")
-                    #return
-                    
-                # Update status message periodically
-                await status_msg.edit(content=f"👀 Monitoring stop orders for {symbol}... (Both orders still active)")
-                
-                # Wait before checking again (avoid rate limits)
-                await asyncio.sleep(5)
-                
-        except Exception as e:
-            logger.error(f"Error monitoring stop orders: {str(e)}")
-            await ctx.send(f"❌ Error monitoring stop orders: {str(e)}")
-
-    @commands.command(name="last_binance_trades")
-    async def last_binance_trades(self, ctx, symbol: Optional[str] = "BTCUSDC", limit: int = 10):
-        """
-        Fetch and display recent trades from Binance
+            logger.info(f"Starting full position for {symbol}, side: {side}, amount: {amount}")
         
-        Parameters:
-        symbol: Trading pair (optional, e.g., BTCUSDC)
-        limit: Number of trades to retrieve (default: 10)
-        """
-        try:
             # Show processing message
-            processing_msg = await ctx.send(f"⏳ Retrieving latest {limit} trades for {symbol}...")
+            processing_msg = await ctx.send(f"⏳ Creating full position for {symbol}...")
             
-            # Create Binance API service
-            binance_service = BinanceService()
-            
-            # Get recent trades
-            trades = await binance_service.get_recent_trades(symbol, limit)
-            
-            if not trades:
-                await processing_msg.edit(content=f"No recent trades found for {symbol}.")
-                return
-            
-            # Create embed for displaying trades
-            embed = discord.Embed(
-                title=f"Recent Trades for {symbol}",
-                color=discord.Color.blue(),
+            # Step 1: Create the market order to enter the position using the binance_service            
+            # Create order request object
+            order_request = OrderRequest(
+                symbol=symbol.upper(),
+                side=OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL,
+                order_type=OrderType.MARKET,
+                amount=float(amount),
+                price=None,  # Not needed for market order
+                use_funds=False,
+                auto_borrow=auto_borrow,
+                is_isolated=False  # Using cross margin
             )
             
-            # Add trade details to embed
-            for i, trade in enumerate(trades[:min(5, len(trades))]):
+            # Place the market order
+            market_order_response = await self.binance_service.place_order(order_request)
+            
+            if not market_order_response.is_success:
+                await processing_msg.edit(content=f"❌ Market order failed: {market_order_response.error_message}")
+                return
+            
+            # Extract order data from the response
+            order_data = market_order_response.order_data["data"]
+            logger.info(order_data)
+            # Get executed price and quantity from the fills
+            fills = order_data.get("fills", [])
+            if not fills:
+                await processing_msg.edit(content="❌ No fill information in market order response")
+                return
+            
+            # Calculate weighted average price if multiple fills
+            executed_qty = float(order_data.get("executedQty", 0))
+            executed_quote_qty = float(order_data.get("cummulativeQuoteQty", 0))
+            executed_price = executed_quote_qty / executed_qty if executed_qty > 0 else 0
+            
+            # Map direction based on side (1 for buy, -1 for sell)
+            d = {"buy": 1, "sell": -1}
+            direction = d.get(side.lower(), 0)
+
+            # Step 2: Calculate TP and SL levels using the provided formula
+            # Fees and Risk
+            m = 10  # You can adjust this or make it a parameter
+            f0 = 0.001  # Fee for market entry
+            ft = 0.001  # Fee for OCO exit
+            risk = 0.01 * m  # Risk amount
+            rr = rr  # Risk/reward ratio
+            
+            # Calculate take profit and stop loss prices
+            tp = (risk * rr + executed_qty * executed_price * (f0 + direction)) / (executed_qty * (direction - ft))
+            sl = (risk - executed_qty * executed_price * (f0 + direction)) / (executed_qty * (ft - direction))
+            
+            logger.info(f"Calculated TP: {tp}, SL: {sl} for {symbol} position")
+
+            # Step 3: Create OCO order
+            opposite_side = "sell" if side.lower() == "buy" else "buy"
+            
+            # Place OCO order
+            oco_response = await self.binance_service.place_oco_order(
+                symbol=symbol.upper(),
+                side=opposite_side,
+                quantity=executed_qty,
+                price=tp,
+                stop_price=sl,
+                stop_limit_price=None,  # Using market stops
+                is_isolated=False,  # Using cross margin
+                auto_borrow=auto_borrow
+            )
+            
+            logger.info(oco_response)
+            if oco_response.get("error", False):
+                await processing_msg.edit(content=f"❌ Market order placed but OCO order failed: {oco_response.get('msg', 'Unknown error')}")
+                return
+
+            # Step 4: Send completion message with position details
+            embed = discord.Embed(
+                title=f"✅ Full Position Created for {symbol}",
+                description=f"{side.upper()} position opened with take-profit and stop-loss",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+            
+            embed.add_field(name="Entry Price", value=f"${executed_price:.8f}", inline=True)
+            embed.add_field(name="Position Size", value=f"{executed_qty:.8f}", inline=True)
+            embed.add_field(name="Side", value=f"{side.upper()}", inline=True)
+            
+            embed.add_field(name="Take Profit", value=f"${tp:.8f}", inline=True)
+            embed.add_field(name="Stop Loss", value=f"${sl:.8f}", inline=True)
+            embed.add_field(name="Risk/Reward", value=f"{rr:.1f}", inline=True)
+
+            market_order_id = str(order_data.get('orderId', 'Unknown'))
+            embed.add_field(
+                name="Market Order ID", 
+                value=f"`{market_order_id}`", 
+                inline=False
+            )
+            oco_order_id = str(oco_data.get('orderListId', 'Unknown'))
+            # Add OCO order IDs if available
+            oco_data = oco_response.get("data", {})
+            if "orderListId" in oco_data:
                 embed.add_field(
-                    name=f"Trade #{i+1}",
-                    value=f"Side: {trade.side}\nPrice: ${trade.price:.8f}\nSize: {trade.size:.8f}\nTotal: ${trade.total_value:.2f}",
+                    name="OCO Order List ID", 
+                    value=f"`{oco_order_id}`", 
                     inline=False
                 )
-            
-            # Update the message with the embed
-            await processing_msg.edit(content=None, embed=embed)
-            
-        except Exception as e:
-            logger.error(f"Error in last_binance_trades: {str(e)}")
-            await ctx.send(f"❌ Error retrieving trade data: {str(e)}")
 
+            embed.set_footer(text=f"Requested by {ctx.author.display_name} | Today at {datetime.now().strftime('%H:%M')}")
+
+            logger.info("Position opened succesfully!")
+            # Update the processing message with the completed embed
+            await processing_msg.edit(content=None, embed=embed)
+
+
+        except Exception as e:
+            logger.error(f"Error in full_position: {str(e)}")
+            await ctx.send(f"❌ Error creating full position: {str(e)}")
+
+    @commands.command(name="fullpos", aliases=["fp"])
+    async def full_position_command(
+        self, 
+        ctx, 
+        market: str, 
+        side: str, 
+        amount: str, 
+        auto_borrow: bool = True,
+        rr: float = 1.5
+    ):
+        """
+        Create a full position with market entry and OCO exit orders
+        
+        Parameters:
+        market: Trading pair (e.g., BTCUSDT)
+        side: buy or sell
+        amount: Amount to trade
+        auto_borrow: Whether to enable auto-borrowing (optional, default: True)
+        rr: Risk/reward ratio (optional, default: 1.5)
+        
+        Examples:
+        !fullpos BTCUSDT buy 0.001         (default 1.5 R:R ratio)
+        !fullpos ETHUSDT sell 0.01 True 2.0  (2.0 R:R ratio)
+        """
+        # Call the full_position method with all parameters
+        await self.full_position(ctx, market, side, amount, auto_borrow, rr)
+    
+
+    
+    
+    
 async def setup(bot):
     """Add the TradeInspector cog to the bot"""
     await bot.add_cog(TradeInspector(bot))

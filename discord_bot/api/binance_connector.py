@@ -453,7 +453,7 @@ class AsyncBinanceConnectorAPI:
             "symbol": symbol,
             "side": side,
             "type": order_type,
-            "sideEffectType": side_effect_type
+            "sideEffectType": side_effect_type,
         }
         
         # Add timeInForce only for limit orders
