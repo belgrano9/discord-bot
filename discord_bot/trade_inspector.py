@@ -149,9 +149,8 @@ class TradeInspector(commands.Cog):
                 inline=False
             )
 
-            embed.set_footer(text=f"Requested by {ctx.author.display_name} | Today at {datetime.now().strftime('%H:%M')}")
-
-            logger.info("Position opened succesfully!")
+            embed.set_footer(text=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
+            logger.info(f"Successfully opened and formatted full position for {ctx.author} using service.")
             # Update the processing message with the completed embed
             await processing_msg.edit(content=None, embed=embed)
 

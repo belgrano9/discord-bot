@@ -16,6 +16,10 @@ from portfolio import setup as setup_portfolio_tracker
 from reports import setup as setup_scheduled_reports
 from trading import setup as setup_trading_commands
 from trade_inspector import setup as setup_trade_inspector
+from dotenv import load_dotenv
+
+# Load variables from .env file into environment variables
+load_dotenv()
 
 # Create module logger
 logger = get_logger("bot")
