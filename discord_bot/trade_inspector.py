@@ -148,15 +148,6 @@ class TradeInspector(commands.Cog):
                 value=f"`{market_order_id}`", 
                 inline=False
             )
-            oco_order_id = str(oco_data.get('orderListId', 'Unknown'))
-            # Add OCO order IDs if available
-            oco_data = oco_response.get("data", {})
-            if "orderListId" in oco_data:
-                embed.add_field(
-                    name="OCO Order List ID", 
-                    value=f"`{oco_order_id}`", 
-                    inline=False
-                )
 
             embed.set_footer(text=f"Requested by {ctx.author.display_name} | Today at {datetime.now().strftime('%H:%M')}")
 
