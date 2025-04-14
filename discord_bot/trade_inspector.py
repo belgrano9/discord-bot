@@ -64,7 +64,7 @@ class TradeInspector(commands.Cog):
                 price=None,  # Not needed for market order
                 use_funds=False,
                 auto_borrow=auto_borrow,
-                is_isolated=True  # Using cross margin
+                is_isolated=True  
             )
             
             # Place the market order
@@ -94,18 +94,28 @@ class TradeInspector(commands.Cog):
 
             # Step 2: Calculate TP and SL levels using the provided formula
             # Fees and Risk
-            m = 10  # You can adjust this or make it a parameter
+            #m = 10  # You can adjust this or make it a parameter
             f0 = 0.001  # Fee for market entry
             ft = 0.001  # Fee for OCO exit
-            risk = 0.01 * m  # Risk amount
+            risk = 0.01  # Risk amount
             rr = rr  # Risk/reward ratio
             
             # Calculate take profit and stop loss prices
-            tp = (risk * rr + executed_qty * executed_price * (f0 + direction)) / (executed_qty * (direction - ft))
-            sl = (risk - executed_qty * executed_price * (f0 + direction)) / (executed_qty * (ft - direction))
-            
-            logger.info(f"Calculated TP: {tp}, SL: {sl} for {symbol} position")
+            tp = (risk * executed_price * rr + executed_price * (f0 + direction)) / (direction - ft)
+            sl = (risk * executed_price - executed_price * (f0 + direction)) / (ft - direction)
 
+            gained_value = direction * executed_qty * (tp - executed_price) - executed_qty * executed_price * f0 - executed_qty * tp * ft
+            lost_value = direction * executed_qty * (sl - executed_price) - executed_qty * executed_price * f0 - executed_qty * sl * ft
+            real_rr = round(- gained_value / lost_value, 3)
+            no_fees_rr = round((tp - executed_price) / (executed_price-sl), 3)
+
+            logger.info(f"Calculated TP: {tp}, SL: {sl} for {symbol} position")
+            logger.info(f"Potential gains: {gained_value}\t - \t Potential losses: {lost_value}")
+            logger.info(f"Real RR: {real_rr} (without fees: {no_fees_rr})")
+
+            if real_rr != rr:
+                logger.error("RR doesn't match! Check formulas.")
+            
             # Step 3: Create OCO order
             opposite_side = "sell" if side.lower() == "buy" else "buy"
             
@@ -140,7 +150,7 @@ class TradeInspector(commands.Cog):
             
             embed.add_field(name="Take Profit", value=f"${tp:.8f}", inline=True)
             embed.add_field(name="Stop Loss", value=f"${sl:.8f}", inline=True)
-            embed.add_field(name="Risk/Reward", value=f"{rr:.1f}", inline=True)
+            embed.add_field(name="Risk/Reward", value=f"{real_rr} (Theory: {rr})", inline=True)
 
             market_order_id = str(order_data.get('orderId', 'Unknown'))
             embed.add_field(
@@ -158,6 +168,8 @@ class TradeInspector(commands.Cog):
         except Exception as e:
             logger.error(f"Error in full_position: {str(e)}")
             await ctx.send(f"❌ Error creating full position: {str(e)}")
+
+
 
     @commands.command(name="fullpos", aliases=["fp"])
     async def full_position_command(

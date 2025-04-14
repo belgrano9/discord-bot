@@ -39,7 +39,7 @@ class BinanceService:
                 "symbol": order.symbol,
                 "side": order.side.value.upper(),  # Use .value
                 "order_type": order.order_type.value.upper(), # Use .value
-                "is_isolated": False,  # Hardcoded Cross, adjust if needed based on order.is_isolated
+                "is_isolated": order.is_isolated,
                 "side_effect_type": "AUTO_BORROW_REPAY" if order.auto_borrow else "NO_SIDE_EFFECT",
                 "new_client_order_id": order.client_oid
             }
