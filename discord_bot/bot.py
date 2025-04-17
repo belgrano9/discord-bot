@@ -17,6 +17,7 @@ from reports import setup as setup_scheduled_reports
 from trading import setup as setup_trading_commands
 from trade_inspector import setup as setup_trade_inspector
 from dotenv import load_dotenv
+from trading.simple_cog import setup as setup_simple_cog
 
 # Load variables from .env file into environment variables
 load_dotenv()
@@ -42,7 +43,15 @@ async def on_ready():
 
     # Load the cogs in a specific order
     logger.debug("Loading cogs...")
+     
+    try:
+        await setup_simple_cog(bot)
+        logger.info("Simple cog loaded!")
+    except Exception as e:
+        logger.error(f"Error loading simple cog: {e}")
+
     
+    """
     # 1. Load stock commands (no dependencies)
     try:
         await setup_stock_commands(bot)
@@ -95,7 +104,7 @@ async def on_ready():
         logger.info("Trade inspector loaded!")
     except Exception as e:
         logger.error(f"Error loading Trade inspector: {e}")
-
+    """
     
 
 

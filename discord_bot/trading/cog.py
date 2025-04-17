@@ -6,6 +6,7 @@ Provides functionality for crypto trading and market data.
 from discord.ext import commands
 from typing import Optional
 from loguru import logger
+import time 
 
 from .interactions.reaction_handler import ReactionHandler
 from .commands.order_commands import OrderCommands
@@ -256,8 +257,9 @@ class TradingCommands(commands.Cog):
         symbol_upper = symbol.upper() if symbol else None
         await self.account_commands.handle_open_orders(ctx, symbol_upper) # Delegate
 
+    # In trading/cog.py - cancel_all_orders command
     @commands.command(name="cancelall", aliases=['canall', 'call'])
-    @commands.cooldown(1, 5, commands.BucketType.user)  # Limit to prevent abuse
+    @commands.cooldown(1, 5, commands.BucketType.user)
     async def cancel_all_orders(self, ctx, symbol: str, isolated: bool = False):
         """
         Cancel all open margin orders for a specific symbol.
@@ -270,8 +272,40 @@ class TradingCommands(commands.Cog):
         !cancelall BTCUSDC
         !cancelall BTCUSDC True
         """
-        logger.info(f"Cancel all orders command invoked by {ctx.author} for symbol: {symbol}, isolated: {isolated}")
-        await self.order_commands.handle_cancel_all_orders(ctx, symbol.upper(), isolated)
+        # Add unique tracking ID for this command execution
+        tracking_id = f"{ctx.author.id}_{int(time.time())}"
+        logger.info(f"[CANCELALL:{tracking_id}] Command invoked by {ctx.author} for symbol: {symbol}, isolated: {isolated}")
+        
+        # Check if symbol is valid format
+        if not symbol or len(symbol) < 5:
+            logger.warning(f"[CANCELALL:{tracking_id}] Invalid symbol format: '{symbol}'")
+            await ctx.send("❌ Invalid symbol format. Please use a valid trading pair (e.g., BTCUSDT).")
+            return
+            
+        # Pass tracking ID to the handler for continued logging
+        await self.order_commands.handle_cancel_all_orders(ctx, symbol.upper(), isolated, tracking_id)
+
+    @commands.command(name="closeall", aliases=["closepos", "exitall"])
+    @commands.cooldown(1, 30, commands.BucketType.user)  # Limit to prevent abuse
+    async def close_all_positions(self, ctx):
+        """
+        Close all active margin positions with market orders
+        
+        This command will:
+        1. Get all active positions across your isolated margin accounts
+        2. Create market orders to close each position
+        3. Report the results
+        
+        Use with caution! This will immediately close all positions at market price.
+        """
+        logger.info(f"Close all positions command invoked by {ctx.author} in channel {ctx.channel.name} (ID: {ctx.channel.id})")
+        logger.debug(f"Message content: '{ctx.message.content}', Message ID: {ctx.message.id}")
+        try:
+            await self.order_commands.handle_close_all_positions(ctx)
+            logger.info(f"Close all positions command completed for {ctx.author}")
+        except Exception as e:
+            logger.exception(f"Unhandled exception in close_all_positions command: {str(e)}")
+            await ctx.send(f"❌ A critical error occurred: {str(e)}")
 
 
     @commands.Cog.listener()

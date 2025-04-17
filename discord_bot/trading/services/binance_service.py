@@ -11,7 +11,7 @@ import json
 from api.binance_connector import AsyncBinanceConnectorAPI
 from ..models.order import OrderRequest, OrderResponse, OrderSide, OrderType
 from ..models.account import Asset, MarginAccount, TradeInfo
-
+import time
 
 class BinanceService:
     """Service for interacting with Binance API"""
@@ -418,7 +418,8 @@ class BinanceService:
     async def cancel_all_margin_orders(
         self,
         symbol: str,
-        is_isolated: bool = False
+        is_isolated: bool = False,
+        tracking_id: str = None
     ) -> Dict[str, Any]:
         """
         Cancel all open margin orders for a specific symbol.
@@ -426,24 +427,39 @@ class BinanceService:
         Args:
             symbol: Trading pair symbol (e.g., BTCUSDT)
             is_isolated: Whether to cancel isolated margin orders
+            tracking_id: Optional tracking ID for logging continuity
             
         Returns:
             API response including cancelled orders
         """
+        tracking_id = tracking_id or f"auto_{int(time.time())}"
+        logger.info(f"[CANCELALL:{tracking_id}] Service method started for {symbol} (isolated={is_isolated})")
+        
         try:
             # First, check if there are any open orders for this symbol
-            logger.info(f"Checking for open {symbol} margin orders (isolated={is_isolated})")
+            logger.info(f"[CANCELALL:{tracking_id}] Checking for open {symbol} margin orders")
             open_orders = await self.get_open_orders(symbol=symbol, is_isolated=is_isolated)
+            
+            # Log the open orders response
+            logger.debug(f"[CANCELALL:{tracking_id}] get_open_orders response: {open_orders}")
             
             # If no orders or error getting orders, return appropriate response
             if open_orders.get("error", False):
-                logger.warning(f"Error checking open orders: {open_orders.get('msg')}")
+                logger.warning(f"[CANCELALL:{tracking_id}] Error checking open orders: {open_orders.get('msg')}")
                 return open_orders
             
             open_orders_list = open_orders.get("data", [])
+            order_count = len(open_orders_list) if isinstance(open_orders_list, list) else "unknown"
+            logger.info(f"[CANCELALL:{tracking_id}] Found {order_count} open orders to cancel")
+            
             if not open_orders_list or len(open_orders_list) == 0:
-                logger.info(f"No open {symbol} margin orders to cancel")
+                logger.info(f"[CANCELALL:{tracking_id}] No open {symbol} margin orders to cancel")
                 return {"code": "200000", "data": [], "msg": "No open orders to cancel"}
+            
+            # Log sample of orders to be cancelled (first 3)
+            if isinstance(open_orders_list, list) and len(open_orders_list) > 0:
+                order_sample = open_orders_list[:3]
+                logger.debug(f"[CANCELALL:{tracking_id}] Sample of orders to cancel: {order_sample}")
             
             # Prepare parameters
             params = {
@@ -454,32 +470,280 @@ class BinanceService:
             if is_isolated:
                 params["isIsolated"] = "TRUE"
             
-            logger.debug(f"Calling method 'margin_open_orders_cancellation' with params: {params}")
+            logger.debug(f"[CANCELALL:{tracking_id}] Calling method 'margin_open_orders_cancellation' with params: {params}")
             
-            # The method exists but might not be properly accessible through _run_client_method
-            # Let's try to directly access the client object's method
+            # Try to directly access the client object's method
             try:
                 # Get direct reference to the client object
                 client = self.api.client.client
                 
-                # Call the method directly on the client
-                if hasattr(client, 'margin_open_orders_cancellation'):
+                # Log available attributes/methods on the client object
+                client_attrs = dir(client)
+                logger.debug(f"[CANCELALL:{tracking_id}] Client object attributes: {client_attrs}")
+                
+                # Check if the method exists
+                has_method = hasattr(client, 'margin_open_orders_cancellation')
+                logger.info(f"[CANCELALL:{tracking_id}] Client has 'margin_open_orders_cancellation' method: {has_method}")
+                
+                # Look for similar methods that might be used instead
+                margin_methods = [attr for attr in client_attrs if 'margin' in attr.lower() and 'cancel' in attr.lower()]
+                logger.info(f"[CANCELALL:{tracking_id}] Similar margin cancellation methods found: {margin_methods}")
+                
+                if has_method:
+                    # Log method information if possible
+                    import inspect
+                    if inspect.ismethod(getattr(client, 'margin_open_orders_cancellation')):
+                        method_info = inspect.signature(client.margin_open_orders_cancellation)
+                        logger.debug(f"[CANCELALL:{tracking_id}] Method signature: {method_info}")
+                    
+                    # Call the method directly on the client
+                    logger.info(f"[CANCELALL:{tracking_id}] Calling client.margin_open_orders_cancellation")
                     response = await asyncio.to_thread(client.margin_open_orders_cancellation, **params)
-                    logger.debug(f"Direct method call response: {response}")
+                    logger.debug(f"[CANCELALL:{tracking_id}] Direct method call response: {response}")
                     
                     return {"code": "200000", "data": response}
                 else:
-                    logger.error(f"Method 'margin_open_orders_cancellation' not found on client object")
-                    return {"error": True, "msg": "API method not available on client object"}
+                    # If the exact method doesn't exist, try an alternative if available
+                    if margin_methods:
+                        alt_method_name = margin_methods[0]
+                        logger.info(f"[CANCELALL:{tracking_id}] Trying alternative method: {alt_method_name}")
+                        alt_method = getattr(client, alt_method_name)
+                        try:
+                            # Attempt to call the alternative method
+                            alt_response = await asyncio.to_thread(alt_method, **params)
+                            logger.debug(f"[CANCELALL:{tracking_id}] Alternative method response: {alt_response}")
+                            return {"code": "200000", "data": alt_response}
+                        except Exception as alt_error:
+                            logger.error(f"[CANCELALL:{tracking_id}] Alternative method failed: {str(alt_error)}")
+                    
+                    # If we get here, no suitable method was found
+                    logger.error(f"[CANCELALL:{tracking_id}] Method 'margin_open_orders_cancellation' not found on client object")
+                    return {"error": True, "msg": "API method not available on client object", "available_methods": margin_methods}
                     
             except Exception as api_error:
-                logger.error(f"Direct API method error: {str(api_error)}")
-                return {"error": True, "msg": f"API method error: {str(api_error)}"}
-                
+                logger.error(f"[CANCELALL:{tracking_id}] Direct API method error: {str(api_error)}")
+                # Try to get a more detailed traceback
+                import traceback
+                tb = traceback.format_exc()
+                logger.error(f"[CANCELALL:{tracking_id}] API error traceback:\n{tb}")
+                return {"error": True, "msg": f"API method error: {str(api_error)}", "traceback": tb}
+                    
         except Exception as e:
-            logger.exception(f"Unexpected error in cancel_all_margin_orders: {str(e)}")
+            logger.exception(f"[CANCELALL:{tracking_id}] Unexpected error in cancel_all_margin_orders: {str(e)}")
+            import traceback
+            tb = traceback.format_exc()
+            return {"error": True, "msg": f"Service error: {str(e)}", "traceback": tb}
+    
+
+    async def close_all_positions(self) -> Dict[str, Any]:
+        """
+        Close all active isolated margin positions.
+        
+        Returns:
+            Dictionary containing results for each position closure attempt
+        """
+        logger.info("==== STARTING CLOSE ALL POSITIONS OPERATION ====")
+        operation_id = f"close_all_{int(time.time())}"  # Generate unique operation ID for tracking
+        logger.info(f"[{operation_id}] Operation started")
+        
+        results = {
+            "success": [],
+            "failed": [],
+            "summary": {"total": 0, "succeeded": 0, "failed": 0}
+        }
+        
+        try:
+            # Step 1: Get all isolated margin accounts (positions)
+            logger.info(f"[{operation_id}] Fetching all isolated margin accounts to identify positions")
+            account_data = await self.get_isolated_margin_account_summary()
+            
+            if account_data.get("error", False):
+                logger.error(f"[{operation_id}] Error fetching margin accounts: {account_data.get('msg')}")
+                return {"error": True, "msg": f"Error fetching margin accounts: {account_data.get('msg')}"}
+            
+            accounts = account_data.get("accounts", [])
+            logger.info(f"[{operation_id}] Found {len(accounts)} isolated margin accounts")
+            logger.debug(f"[{operation_id}] Account symbols: {[account.get('symbol', 'N/A') for account in accounts]}")
+            
+            # Log count of accounts by status
+            statuses = {}
+            for account in accounts:
+                status = account.get("marginLevelStatus", "Unknown")
+                statuses[status] = statuses.get(status, 0) + 1
+            logger.info(f"[{operation_id}] Account status breakdown: {statuses}")
+            
+            # Step 2: Identify active positions and close them
+            position_count = 0
+            for idx, account in enumerate(accounts):
+                symbol = account.get("symbol")
+                if not symbol:
+                    logger.warning(f"[{operation_id}] Account #{idx+1} missing symbol: {account}")
+                    continue
+                    
+                logger.debug(f"[{operation_id}] Processing account for {symbol} ({idx+1}/{len(accounts)})")
+                
+                # Get base and quote assets
+                base_asset = account.get("baseAsset", {})
+                quote_asset = account.get("quoteAsset", {})
+                
+                base_borrowed = float(base_asset.get("borrowed", "0"))
+                base_total = float(base_asset.get("totalAsset", "0"))
+                quote_borrowed = float(quote_asset.get("borrowed", "0"))
+                quote_total = float(quote_asset.get("totalAsset", "0"))
+                
+                # Log the account balance details
+                logger.debug(f"[{operation_id}] {symbol} Base asset ({base_asset.get('asset')}): Total={base_total}, Borrowed={base_borrowed}")
+                logger.debug(f"[{operation_id}] {symbol} Quote asset ({quote_asset.get('asset')}): Total={quote_total}, Borrowed={quote_borrowed}")
+                
+                position_info = {
+                    "symbol": symbol,
+                    "base_asset": base_asset.get("asset"),
+                    "quote_asset": quote_asset.get("asset")
+                }
+                
+                results["summary"]["total"] += 1
+                
+                # Check for long position (holding base asset)
+                if base_total > 0.00001:  # Small threshold to avoid dust
+                    position_count += 1
+                    # Prepare to sell base asset
+                    logger.info(f"[{operation_id}] Found long position #{position_count} for {symbol}: selling {base_total} {base_asset.get('asset')}")
+                    
+                    position_info["position_type"] = "long"
+                    position_info["size"] = base_total
+                    
+                    try:
+                        # Log the order request details
+                        logger.debug(f"[{operation_id}] Creating SELL market order for {symbol}: amount={base_total}")
+                        
+                        # Create market sell order
+                        order_request = OrderRequest(
+                            symbol=symbol,
+                            side=OrderSide.SELL,
+                            order_type=OrderType.MARKET,
+                            amount=base_total,
+                            price=None,
+                            auto_borrow=False,
+                            is_isolated=True
+                        )
+                        
+                        # Log order request validation
+                        is_valid, validation_error = order_request.validate()
+                        if not is_valid:
+                            logger.error(f"[{operation_id}] Order validation failed for {symbol}: {validation_error}")
+                        
+                        # Place the order
+                        logger.info(f"[{operation_id}] Submitting SELL market order for {symbol}")
+                        order_response = await self.place_order(order_request)
+                        
+                        if order_response.is_success:
+                            position_info["order_id"] = order_response.order_id
+                            position_info["status"] = "closed"
+                            results["success"].append(position_info)
+                            results["summary"]["succeeded"] += 1
+                            
+                            # Log detailed success info
+                            logger.info(f"[{operation_id}] Successfully closed long position for {symbol}, order ID: {order_response.order_id}")
+                            if order_response.order_data:
+                                executed_qty = order_response.order_data.get("executedQty", "unknown")
+                                executed_price = order_response.order_data.get("price", "market")
+                                logger.debug(f"[{operation_id}] Order filled: {executed_qty} @ {executed_price}")
+                        else:
+                            position_info["error"] = order_response.error_message
+                            position_info["status"] = "failed"
+                            results["failed"].append(position_info)
+                            results["summary"]["failed"] += 1
+                            
+                            # Log detailed error info
+                            logger.error(f"[{operation_id}] Failed to close long position for {symbol}: {order_response.error_message}")
+                            logger.debug(f"[{operation_id}] Full error response: {order_response.order_data}")
+                            
+                    except Exception as e:
+                        logger.exception(f"[{operation_id}] Exception while closing long position for {symbol}: {str(e)}")
+                        position_info["error"] = str(e)
+                        position_info["status"] = "failed"
+                        results["failed"].append(position_info)
+                        results["summary"]["failed"] += 1
+                
+                # Check for short position (borrowed base asset)
+                elif base_borrowed > 0.00001:
+                    position_count += 1
+                    # Prepare to buy back base asset
+                    logger.info(f"[{operation_id}] Found short position #{position_count} for {symbol}: buying back {base_borrowed} {base_asset.get('asset')}")
+                    
+                    position_info["position_type"] = "short"
+                    position_info["size"] = base_borrowed
+                    
+                    try:
+                        # Log the order request details
+                        logger.debug(f"[{operation_id}] Creating BUY market order for {symbol}: amount={base_borrowed}")
+                        
+                        # Create market buy order
+                        order_request = OrderRequest(
+                            symbol=symbol,
+                            side=OrderSide.BUY,
+                            order_type=OrderType.MARKET,
+                            amount=base_borrowed,
+                            price=None,
+                            auto_borrow=False,
+                            is_isolated=True
+                        )
+                        
+                        # Log order request validation
+                        is_valid, validation_error = order_request.validate()
+                        if not is_valid:
+                            logger.error(f"[{operation_id}] Order validation failed for {symbol}: {validation_error}")
+                        
+                        # Place the order
+                        logger.info(f"[{operation_id}] Submitting BUY market order for {symbol}")
+                        order_response = await self.place_order(order_request)
+                        
+                        if order_response.is_success:
+                            position_info["order_id"] = order_response.order_id
+                            position_info["status"] = "closed"
+                            results["success"].append(position_info)
+                            results["summary"]["succeeded"] += 1
+                            
+                            # Log detailed success info
+                            logger.info(f"[{operation_id}] Successfully closed short position for {symbol}, order ID: {order_response.order_id}")
+                            if order_response.order_data:
+                                executed_qty = order_response.order_data.get("executedQty", "unknown")
+                                executed_price = order_response.order_data.get("price", "market")
+                                logger.debug(f"[{operation_id}] Order filled: {executed_qty} @ {executed_price}")
+                        else:
+                            position_info["error"] = order_response.error_message
+                            position_info["status"] = "failed"
+                            results["failed"].append(position_info)
+                            results["summary"]["failed"] += 1
+                            
+                            # Log detailed error info
+                            logger.error(f"[{operation_id}] Failed to close short position for {symbol}: {order_response.error_message}")
+                            logger.debug(f"[{operation_id}] Full error response: {order_response.order_data}")
+                            
+                    except Exception as e:
+                        logger.exception(f"[{operation_id}] Exception while closing short position for {symbol}: {str(e)}")
+                        position_info["error"] = str(e)
+                        position_info["status"] = "failed"
+                        results["failed"].append(position_info)
+                        results["summary"]["failed"] += 1
+                else:
+                    # No position for this symbol
+                    logger.debug(f"[{operation_id}] No active position for {symbol} (base_total={base_total}, base_borrowed={base_borrowed})")
+            
+            # Log final summary
+            logger.info(f"[{operation_id}] Position closure operation completed")
+            logger.info(f"[{operation_id}] Summary: Attempted={results['summary']['total']}, Succeeded={results['summary']['succeeded']}, Failed={results['summary']['failed']}")
+            
+            if position_count == 0:
+                logger.info(f"[{operation_id}] No active positions found to close")
+            
+            return results
+        
+        except Exception as e:
+            logger.exception(f"[{operation_id}] Unexpected error in close_all_positions: {str(e)}")
             return {"error": True, "msg": f"Service error: {str(e)}"}
-   
+    
+    
     def _format_timestamp(self, timestamp_ms: Optional[int]) -> Optional[str]:
         """Format a timestamp in milliseconds to a readable string"""
         # Ensure this helper is still here if needed for formatting below

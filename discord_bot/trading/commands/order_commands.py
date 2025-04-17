@@ -754,11 +754,131 @@ class OrderCommands:
             logger.exception(f"Error handling OCO order: {str(e)}")
             await ctx.send(f"❌ An error occurred: {str(e)}")
 
+    async def handle_close_all_positions(self, ctx: commands.Context):
+        """
+        Handle the closeall command to close all active positions.
+        
+        Args:
+            ctx: Discord context
+        """
+        command_id = f"cmd_{ctx.message.id}"
+        logger.info(f"[{command_id}] User {ctx.author} ({ctx.author.id}) invoked close_all_positions command")
+        
+        # Security check: only users with Trading-Authorized role can close positions
+        required_role = discord.utils.get(ctx.guild.roles, name="Trading-Authorized")
+        if required_role is None or required_role not in ctx.author.roles:
+            logger.warning(f"[{command_id}] User {ctx.author} lacks required role 'Trading-Authorized'")
+            await ctx.send("⛔ You don't have permission to close positions. You need the 'Trading-Authorized' role.")
+            return
+        
+        logger.info(f"[{command_id}] User {ctx.author} has required permissions, proceeding to confirmation")
+        
+        # Get confirmation from user
+        confirmed = await self.input_manager.confirm_action(
+            ctx,
+            title="⚠️ Confirm Closing All Positions",
+            description="You are about to close ALL active margin positions. This will create market orders to close each position immediately.\n\nThis action cannot be undone.",
+            color=discord.Color.red(),
+            use_reactions=True
+        )
+        
+        if not confirmed:
+            logger.info(f"[{command_id}] User {ctx.author} cancelled the operation")
+            await ctx.send("🛑 Operation canceled. No positions were closed.")
+            return
+        
+        logger.info(f"[{command_id}] User {ctx.author} confirmed, executing close all positions")
+        
+        # Send processing message
+        processing_msg = await ctx.send("⏳ Closing all positions... This might take a moment.")
+        logger.debug(f"[{command_id}] Sent processing message")
+        
+        try:
+            # Call the service to close all positions
+            logger.info(f"[{command_id}] Calling binance_service.close_all_positions()")
+            start_time = time.time()
+            results = await self.binance_service.close_all_positions()
+            execution_time = time.time() - start_time
+            logger.info(f"[{command_id}] Service call completed in {execution_time:.2f} seconds")
+            
+            if results.get("error", False):
+                # Handle service error
+                error_msg = results.get("msg", "Unknown error")
+                logger.error(f"[{command_id}] Service returned error: {error_msg}")
+                await processing_msg.edit(content=f"❌ Error: {error_msg}")
+                return
+            
+            logger.debug(f"[{command_id}] Processing service results: {results}")
+            
+            # Create results embed
+            summary = results["summary"]
+            succeeded = summary['succeeded']
+            failed = summary['failed']
+            total = summary['total']
+            
+            logger.info(f"[{command_id}] Position closure summary: {succeeded}/{total} succeeded, {failed}/{total} failed")
+            
+            embed = discord.Embed(
+                title="Position Closure Results",
+                description=f"Attempted to close {total} positions.\n✅ {succeeded} succeeded\n❌ {failed} failed",
+                color=discord.Color.green() if failed == 0 else discord.Color.gold(),
+                timestamp=datetime.now()
+            )
+            
+            # Add successful closures
+            if results["success"]:
+                success_details = []
+                for pos in results["success"]:
+                    symbol = pos["symbol"]
+                    pos_type = pos["position_type"].capitalize()
+                    size = pos["size"]
+                    asset = pos["base_asset"]
+                    success_details.append(f"• {symbol}: {pos_type} position of {size} {asset}")
+                    logger.debug(f"[{command_id}] Successfully closed: {symbol} {pos_type} position of {size} {asset}")
+                
+                embed.add_field(
+                    name=f"✅ Successfully Closed ({len(results['success'])})",
+                    value="\n".join(success_details) if success_details else "None",
+                    inline=False
+                )
+            
+            # Add failed closures
+            if results["failed"]:
+                failed_details = []
+                for pos in results["failed"]:
+                    symbol = pos["symbol"]
+                    pos_type = pos["position_type"].capitalize()
+                    size = pos["size"]
+                    asset = pos["base_asset"]
+                    error = pos.get("error", "Unknown error")
+                    failed_details.append(f"• {symbol}: {pos_type} position of {size} {asset}\n  Error: {error}")
+                    logger.warning(f"[{command_id}] Failed to close: {symbol} {pos_type} position of {size} {asset}. Error: {error}")
+                
+                embed.add_field(
+                    name=f"❌ Failed to Close ({len(results['failed'])})",
+                    value="\n".join(failed_details) if failed_details else "None",
+                    inline=False
+                )
+            
+            # Set footer
+            embed.set_footer(text=f"Requested by: {ctx.author} | Duration: {execution_time:.2f}s")
+            
+            # Update the message with the results
+            logger.info(f"[{command_id}] Sending final results to user")
+            await processing_msg.edit(content=None, embed=embed)
+            logger.info(f"[{command_id}] Command execution completed")
+            
+        except Exception as e:
+            logger.exception(f"[{command_id}] Unexpected error in handle_close_all_positions: {str(e)}")
+            await processing_msg.edit(content=f"❌ An unexpected error occurred: {str(e)}")
+        
+
     async def handle_cancel_all_orders(
         self,
         ctx: commands.Context,
         symbol: str,
-        is_isolated: bool = False
+        is_isolated: bool = False,
+        tracking_id: str = None
     ) -> None:
         """
         Handle cancelling all open margin orders for a symbol.
@@ -767,21 +887,22 @@ class OrderCommands:
             ctx: Discord context
             symbol: Trading pair symbol (e.g., BTCUSDC)
             is_isolated: Whether to cancel isolated margin orders (default: False for cross margin)
+            tracking_id: Optional tracking ID for logging continuity
         """
+        # Generate tracking ID if not provided
+        tracking_id = tracking_id or f"auto_{int(time.time())}"
+        logger.info(f"[CANCELALL:{tracking_id}] Handler started for symbol={symbol}, is_isolated={is_isolated}")
+        
         # Security check: only users with Trading-Authorized role can cancel orders
         required_role = discord.utils.get(ctx.guild.roles, name="Trading-Authorized")
         if required_role is None or required_role not in ctx.author.roles:
+            logger.warning(f"[CANCELALL:{tracking_id}] Permission denied - user lacks 'Trading-Authorized' role")
             await ctx.send("⛔ You don't have permission to cancel orders. You need the 'Trading-Authorized' role.")
-            logger.warning(f"User {ctx.author} tried to use !cancelall without 'Trading-Authorized' role.")
-            return
-        
-        # Symbol validation
-        if not symbol:
-            await ctx.send("❌ A trading pair symbol is required (e.g., BTCUSDC)")
             return
         
         # Get confirmation from user
         margin_type = "Isolated" if is_isolated else "Cross"
+        logger.debug(f"[CANCELALL:{tracking_id}] Requesting user confirmation for {margin_type} margin orders")
         confirmed = await self.input_manager.confirm_action(
             ctx,
             title="⚠️ Confirm Cancellation",
@@ -791,23 +912,31 @@ class OrderCommands:
         )
         
         if not confirmed:
+            logger.info(f"[CANCELALL:{tracking_id}] User cancelled the operation")
             await ctx.send("🛑 Cancellation aborted.")
             return
         
         # Send processing message
+        logger.debug(f"[CANCELALL:{tracking_id}] User confirmed, sending processing message")
         processing_msg = await ctx.send(f"⏳ Cancelling all {margin_type} margin orders for {symbol}...")
         
         try:
             # Call the binance service to cancel all orders
+            logger.info(f"[CANCELALL:{tracking_id}] Calling BinanceService.cancel_all_margin_orders")
             response = await self.binance_service.cancel_all_margin_orders(
                 symbol=symbol,
-                is_isolated=is_isolated
+                is_isolated=is_isolated,
+                tracking_id=tracking_id
             )
+            
+            # Log the raw response for debugging
+            logger.debug(f"[CANCELALL:{tracking_id}] Raw service response: {response}")
             
             # Check if the cancellation was successful
             if not response.get("error", False):
                 # Extract the response data
                 cancelled_data = response.get("data", {})
+                logger.info(f"[CANCELALL:{tracking_id}] Cancellation successful, data: {cancelled_data}")
                 
                 # Count how many orders were cancelled
                 cancelled_count = 0
@@ -855,10 +984,13 @@ class OrderCommands:
                 
                 # Update the message
                 await processing_msg.edit(content=None, embed=embed)
+                logger.info(f"[CANCELALL:{tracking_id}] Successfully displayed cancellation results to user")
                 
             else:
                 # Handle error
                 error_msg = response.get("msg", "Unknown error")
+                logger.error(f"[CANCELALL:{tracking_id}] Cancellation failed: {error_msg}")
+                
                 embed = discord.Embed(
                     title="❌ Cancellation Failed",
                     description=f"Failed to cancel {margin_type} margin orders for **{symbol}**.",
@@ -872,8 +1004,14 @@ class OrderCommands:
                     inline=False
                 )
                 
+                # If there's a traceback, log it but don't show to user
+                if "traceback" in response:
+                    logger.error(f"[CANCELALL:{tracking_id}] Error traceback:\n{response['traceback']}")
+                
                 await processing_msg.edit(content=None, embed=embed)
+                logger.info(f"[CANCELALL:{tracking_id}] Displayed error message to user")
                 
         except Exception as e:
-            logger.exception(f"Error cancelling {margin_type} margin orders for {symbol}: {str(e)}")
+            logger.exception(f"[CANCELALL:{tracking_id}] Error cancelling {margin_type} margin orders for {symbol}: {str(e)}")
             await processing_msg.edit(content=f"❌ An unexpected error occurred: {str(e)}")
+            logger.info(f"[CANCELALL:{tracking_id}] Displayed exception message to user") 
