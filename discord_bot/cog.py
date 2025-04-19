@@ -184,8 +184,8 @@ class SimpleBot(commands.Cog):
 
     ######################## Query orders: Open, Cancel All &  Close All ########################
 
-    @commands.command(name="openorders", aliases=['oo', 'open']) # Added aliases
-    @commands.cooldown(1, 5, commands.BucketType.user) # Cooldown: 1 use per 5 sec per user
+    @commands.command(name="openorders", aliases=['oo', 'open'])
+    @commands.cooldown(1, 5, commands.BucketType.user)
     async def open_orders(self, ctx, symbol: Optional[str] = "BTCUSDC"):
         """
         Displays your currently open Binance Margin orders.
@@ -194,10 +194,84 @@ class SimpleBot(commands.Cog):
         Requires the 'Trading-Authorized' role.
         """
         logger.debug(f"Open orders command invoked by {ctx.author} for symbol: {symbol}")
-        # Convert symbol to uppercase if provided before passing
-        symbol_upper = symbol.upper() #if symbol else None
-        await ctx.send(self.client.margin_open_orders(symbol = symbol_upper, isIsolated = True))
-        logger.info(f"Display all open orders command completed for {ctx.author}")
+        
+        # Convert symbol to uppercase
+        symbol_upper = symbol.upper()
+        
+        # Get open orders from Binance
+        try:
+            orders = self.client.margin_open_orders(symbol=symbol_upper, isIsolated=True)
+            logger.debug(f"Retrieved {len(orders)} open orders for {symbol_upper}")
+            
+            if not orders:
+                await ctx.send(f"No open orders found for {symbol_upper}.")
+                return
+                
+            # Create an embed for the order summary
+            embed = discord.Embed(
+                title=f"Open Orders for {symbol_upper}",
+                description=f"Found {len(orders)} active orders",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            
+            # Group orders by type for better organization
+            order_types = {}
+            for order in orders:
+                order_type = order.get('type', 'UNKNOWN')
+                if order_type not in order_types:
+                    order_types[order_type] = []
+                order_types[order_type].append(order)
+            
+            # Add each order group to the embed
+            for order_type, type_orders in order_types.items():
+                # Create a formatted string for all orders of this type
+                orders_text = ""
+                for i, order in enumerate(type_orders):
+                    # Format price with proper precision
+                    price = order.get('price', '0')
+                    if float(price) == 0 and 'stopPrice' in order:
+                        price = order.get('stopPrice', '0')  # Use stop price for STOP orders
+                    
+                    try:
+                        price_float = float(price)
+                        price_formatted = f"${price_float:.2f}"
+                    except (ValueError, TypeError):
+                        price_formatted = price
+                    
+                    # Format time to be readable
+                    timestamp = order.get('time', 0)
+                    time_str = datetime.fromtimestamp(timestamp / 1000).strftime('%Y-%m-%d %H:%M:%S') if timestamp else 'Unknown'
+                    
+                    # Create a concise order summary
+                    side = order.get('side', 'UNKNOWN')
+                    qty = order.get('origQty', '0')
+                    status = order.get('status', 'UNKNOWN')
+                    
+                    # Add emoji based on side
+                    emoji = "🟢" if side == "BUY" else "🔴" if side == "SELL" else "⚪"
+                    
+                    orders_text += f"{emoji} **{side}** {qty} @ {price_formatted}\n"
+                    orders_text += f"   ID: `{order.get('orderId', 'N/A')}` • Status: {status} • Time: {time_str}\n\n"
+                
+                # Add this order type as a field in the embed
+                embed.add_field(
+                    name=f"📊 {order_type} Orders ({len(type_orders)})",
+                    value=orders_text if orders_text else "None",
+                    inline=False
+                )
+            
+            embed.set_footer(
+                text=f"Requested by {ctx.author.display_name}", 
+                icon_url=ctx.author.avatar.url if ctx.author.avatar else None
+            )
+            
+            await ctx.send(embed=embed)
+            logger.info(f"Display all open orders command completed for {ctx.author}")
+            
+        except Exception as e:
+            logger.error(f"Error retrieving open orders: {str(e)}")
+            await ctx.send(f"❌ Error retrieving open orders: {str(e)}")
 
 
     @commands.command(name="cancel")
@@ -246,7 +320,7 @@ class SimpleBot(commands.Cog):
         response = self.client.margin_open_orders_cancellation(symbol=symbol_upper, isIsolated=True)
         logger.info(f"Cancel all open orders command completed for {ctx.author}")
         logger.debug(response)
-        await ctx.send(f"Cancelled all open orders for {symbol_upper}. Response: {response}")
+        await ctx.send(f"✅ Cancelled all open orders for {symbol_upper}. Response: {response}")
 
 
 
