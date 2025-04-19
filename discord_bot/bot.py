@@ -7,22 +7,11 @@ import os
 import discord
 from discord.ext import commands
 from logging_setup import get_logger
-
-# Import modularized setups
-from alerts import setup as setup_stock_alerts
-from price_tracker import setup as setup_price_tracker
-from stocks import setup as setup_stock_commands
-from portfolio import setup as setup_portfolio_tracker
-from reports import setup as setup_scheduled_reports
-from trading import setup as setup_trading_commands
-from trade_inspector import setup as setup_trade_inspector
 from dotenv import load_dotenv
-from trading.simple_cog import setup as setup_simple_cog
+from cog import setup as setup_simple_cog
 
-# Load variables from .env file into environment variables
 load_dotenv()
 
-# Create module logger
 logger = get_logger("bot")
 
 # Setup bot with intents
@@ -46,65 +35,9 @@ async def on_ready():
      
     try:
         await setup_simple_cog(bot)
-        logger.info("Simple cog loaded!")
+        logger.info("Trading cog loaded!")
     except Exception as e:
-        logger.error(f"Error loading simple cog: {e}")
-
-    
-    """
-    # 1. Load stock commands (no dependencies)
-    try:
-        await setup_stock_commands(bot)
-        logger.info("Stock commands loaded!")
-    except Exception as e:
-        logger.error(f"Error loading stock commands: {e}")
-
-    # 2. Load alerts (no dependencies)
-    try:
-        await setup_stock_alerts(bot)
-        logger.info("Stock alerts loaded!")
-    except Exception as e:
-        logger.error(f"Error loading stock alerts: {e}")
-
-    # 3. Load portfolio tracker (no dependencies)
-    try:
-        portfolio_tracker_cog = await setup_portfolio_tracker(bot)
-        logger.info("Portfolio tracker loaded!")
-    except Exception as e:
-        logger.error(f"Error loading portfolio tracker: {e}")
-        portfolio_tracker_cog = None
-
-    # 4. Load price tracker (no dependencies)
-    try:
-        await setup_price_tracker(bot)
-        logger.info("Price tracker loaded!")
-    except Exception as e:
-        logger.error(f"Error loading price tracker: {e}")
-
-    # 5. Load scheduled reports (depends on portfolio tracker)
-    try:
-        if portfolio_tracker_cog:
-            await setup_scheduled_reports(bot)
-            logger.info("Scheduled reports loaded!")
-        else:
-            logger.error("Cannot load scheduled reports: portfolio tracker is None")
-    except Exception as e:
-        logger.error(f"Error loading scheduled reports: {e}")
-
-    # 6. Load trading commands (no dependencies)
-    try:
-        await setup_trading_commands(bot)
-        logger.info("Trading commands loaded!")
-    except Exception as e:
-        logger.error(f"Error loading trading commands: {e}")
-
-    # 7. Load trading inspector (no dependencies)
-    try:
-        await setup_trade_inspector(bot)
-        logger.info("Trade inspector loaded!")
-    except Exception as e:
-        logger.error(f"Error loading Trade inspector: {e}")
-    """
+        logger.error(f"Error loading trading cog: {e}")
     
 
 

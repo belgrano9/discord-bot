@@ -4,9 +4,7 @@ from loguru import logger
 import os
 from binance.spot import Spot as Client
 from typing import Optional
-import json
 from datetime import datetime
-import decimal 
 
 
 class SimpleBot(commands.Cog):
@@ -21,48 +19,167 @@ class SimpleBot(commands.Cog):
         logger.info("Simple cog initialized")
 
 
+
     @commands.command(name="balance", aliases=['bal'])
     @commands.cooldown(1, 10, commands.BucketType.user)
-    async def balance(self, ctx, symbol: Optional[str] = None):
+    async def balance(self, ctx):
         """
-        Displays your margin account balance summary.
-        
-        Parameters:
-        margin_type: Type of margin account ("isolated" or "cross") [default: isolated]
-        symbol: Trading pair symbol for isolated margin (e.g., BTCUSDT) [optional]
+        Displays your BTCUSDC isolated margin account balance.
         
         Examples:
-        !balance           - Show isolated margin accounts
-        !balance BTCUSDT - Show specific isolated margin account
+        !balance - Show BTCUSDC isolated margin account details
         """
-        logger.debug(f"Balance command invoked by {ctx.author} with type=isIsolated, symbol={symbol}")
-        response = self.client.isolated_margin_account() 
+        logger.info(f"Balance command invoked by {ctx.author}")
         
-        logger.debug(response)
+        # Send a temporary message to indicate processing
+        temp_msg = await ctx.send("Fetching margin account data...")
+        
+        try:
+            response = self.client.isolated_margin_account() 
+            logger.debug(f"Margin account response: {response}")
 
-        # Find the assets in the response
-        assets = None
-        if "assets" in response:
-            assets = response["assets"]
-        elif "data" in response and "assets" in response["data"]:
-            assets = response["data"]["assets"]
-        
-        if not assets:
-            await ctx.send("Error: Could not find account data in the response")
-            return
-        
-        # Get summary totals
-        data_root = response["data"] if "data" in response else response
-        total_asset = data_root.get("totalAssetOfBtc", "0")
-        total_liability = data_root.get("totalLiabilityOfBtc", "0")
-        total_net_asset = data_root.get("totalNetAssetOfBtc", "0")
-        
-        await ctx.send(f"Account Summary:\n"
-                      f"Total Asset (BTC): {total_asset}\n"
-                      f"Total Liability (BTC): {total_liability}\n"
-                      f"Total Net Asset (BTC): {total_net_asset}\n"
-                      f"Number of margin positions: {len(assets)}")
-        logger.info(f"Show balance command completed for {ctx.author}")
+            # Find the assets in the response
+            assets = None
+            if "assets" in response:
+                assets = response["assets"]
+            elif "data" in response and "assets" in response["data"]:
+                assets = response["data"]["assets"]
+            
+            if not assets:
+                await temp_msg.edit(content="Error: Could not find account data in the response")
+                return
+            
+            # Filter for BTCUSDC only
+            btc_assets = [asset for asset in assets if asset.get("symbol") == "BTCUSDC"]
+            
+            if not btc_assets:
+                await temp_msg.edit(content="No BTCUSDC isolated margin account found.")
+                return
+                
+            # We'll work with the first (and only) BTCUSDC asset
+            btc_asset = btc_assets[0]
+            
+            # Get account summary totals
+            data_root = response["data"] if "data" in response else response
+            total_asset_btc = float(data_root.get("totalAssetOfBtc", "0"))
+            total_liability_btc = float(data_root.get("totalLiabilityOfBtc", "0"))
+            total_net_asset_btc = float(data_root.get("totalNetAssetOfBtc", "0"))
+            
+            # Get BTC price
+            btc_price = float(btc_asset.get("indexPrice", 0))
+            
+            # Determine color based on margin level
+            margin_level = btc_asset.get("marginLevel", "999")
+            if margin_level == "999":  # Infinite margin level (no borrowing)
+                color = discord.Color.green()
+            else:
+                margin_level_float = float(margin_level)
+                if margin_level_float > 3:
+                    color = discord.Color.green()
+                elif margin_level_float > 1.5:
+                    color = discord.Color.gold()
+                else:
+                    color = discord.Color.red()
+            
+            # Create embed for balance information
+            embed = discord.Embed(
+                title="BTCUSDC Isolated Margin Account",
+                description="Your current BTCUSDC margin position details",
+                color=color,
+                timestamp=datetime.now()
+            )
+            
+            # Get asset details
+            base_asset = btc_asset.get("baseAsset", {})
+            quote_asset = btc_asset.get("quoteAsset", {})
+            
+            # Base asset (BTC)
+            base_free = float(base_asset.get("free", 0))
+            base_locked = float(base_asset.get("locked", 0))
+            base_borrowed = float(base_asset.get("borrowed", 0))
+            base_total = float(base_asset.get("totalAsset", 0))
+            base_net = float(base_asset.get("netAsset", 0))
+            
+            # Quote asset (USDC)
+            quote_free = float(quote_asset.get("free", 0))
+            quote_locked = float(quote_asset.get("locked", 0))
+            quote_borrowed = float(quote_asset.get("borrowed", 0))
+            quote_total = float(quote_asset.get("totalAsset", 0))
+            quote_net = float(quote_asset.get("netAsset", 0))
+            
+            # Calculate USD value
+            btc_usd_value = base_total * btc_price
+            total_usd_value = btc_usd_value + quote_total
+            
+            # Add BTC information
+            embed.add_field(
+                name="Bitcoin (BTC)",
+                value=(
+                    f"**Free:** {base_free:.8f} BTC\n"
+                    f"**Locked:** {base_locked:.8f} BTC\n"
+                    f"**Borrowed:** {base_borrowed:.8f} BTC\n"
+                    f"**Total:** {base_total:.8f} BTC\n"
+                    f"**Value:** ${btc_usd_value:.2f}"
+                ),
+                inline=True
+            )
+            
+            # Add USDC information
+            embed.add_field(
+                name="USD Coin (USDC)",
+                value=(
+                    f"**Free:** ${quote_free:.2f}\n"
+                    f"**Locked:** ${quote_locked:.2f}\n"
+                    f"**Borrowed:** ${quote_borrowed:.2f}\n"
+                    f"**Total:** ${quote_total:.2f}"
+                ),
+                inline=True
+            )
+            
+            # Add position information
+            # Format margin level for display
+            margin_level_display = "∞" if margin_level == "999" else f"{float(margin_level):.2f}×"
+            
+            embed.add_field(
+                name="Position Details",
+                value=(
+                    f"**Current BTC Price:** ${btc_price:.2f}\n"
+                    f"**Total Position Value:** ${total_usd_value:.2f}\n"
+                    f"**Margin Level:** {margin_level_display}\n"
+                    f"**Margin Status:** {btc_asset.get('marginLevelStatus', 'Unknown')}"
+                ),
+                inline=False
+            )
+            
+            # Add account summary
+            total_usd_value_all = total_net_asset_btc * btc_price
+            
+            embed.add_field(
+                name="Account Summary",
+                value=(
+                    f"**Total Assets:** {total_asset_btc:.8f} BTC (${total_asset_btc * btc_price:.2f})\n"
+                    f"**Total Liabilities:** {total_liability_btc:.8f} BTC (${total_liability_btc * btc_price:.2f})\n"
+                    f"**Net Value:** {total_net_asset_btc:.8f} BTC (${total_usd_value_all:.2f})"
+                ),
+                inline=False
+            )
+            
+            # Add footer with user avatar
+            embed.set_footer(
+                text=f"Requested by {ctx.author.display_name}", 
+                icon_url=ctx.author.avatar.url if ctx.author.avatar else None
+            )
+            
+            # Send the embed and delete the temporary message
+            await temp_msg.delete()
+            await ctx.send(embed=embed)
+            logger.info(f"Balance command completed for {ctx.author}")
+            
+        except Exception as e:
+            logger.error(f"Error in balance command: {str(e)}")
+            await temp_msg.edit(content=f"Error fetching margin account data: {str(e)}")
+    
+
 
 
     ######################## Query orders: Open, Cancel All &  Close All ########################
