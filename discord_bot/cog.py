@@ -5,6 +5,10 @@ import os
 from binance.spot import Spot as Client
 from typing import Optional
 from datetime import datetime
+import re
+from datetime import datetime, timedelta
+import asyncio
+
 
 
 class SimpleBot(commands.Cog):
@@ -16,7 +20,12 @@ class SimpleBot(commands.Cog):
         self.client = Client(api_key=api_key, api_secret=api_secret)
         logger.debug("Client initialized")
 
+                # Add after existing attributes in __init__
+        self.pending_signals = {}  # Store pending approvals
+        self.APPROVAL_TIMEOUT = 60  # minutes
         logger.info("Simple cog initialized")
+
+
 
 
 
@@ -635,13 +644,119 @@ class SimpleBot(commands.Cog):
 
 
 
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        # Debug every message to see the actual author details
+        print(f"Message from: '{message.author.name}' (ID: {message.author.id}, Bot: {message.author.bot})")
+        
+        if "TRADING SIGNAL APPROVAL NEEDED" in message.content:
+            print(f"Found signal message from: {message.author.name}")
+            await self.handle_signal_approval(message)
 
 
+    async def handle_signal_approval(self, message):
+        """Parse signal and add reactions"""
+        print(f"FULL MESSAGE CONTENT:\\n{repr(message.content)}")  # Add this line
+        signal_data = self.parse_signal_message(message.content)
+        print(f"Parsed signal_data: {signal_data}")  # Debug
+        
+        if signal_data:
+            self.pending_signals[signal_data['signal_id']] = {
+                'data': signal_data,
+                'message_id': message.id,
+                'channel_id': message.channel.id,
+                'expires_at': datetime.now() + timedelta(minutes=self.APPROVAL_TIMEOUT)
+            }
+            await message.add_reaction('✅')
+            await message.add_reaction('❌')
+            print(f"Signal stored: {signal_data['signal_id']}")  # Debug
 
     @commands.Cog.listener()
     async def on_reaction_add(self, reaction, user):
-        """Handle reactions on messages"""
-        await self.reaction_handler.handle_reaction(reaction, user)
+        if user.bot:
+            return
+        await self.handle_signal_reaction(reaction, user)
+
+    async def handle_signal_reaction(self, reaction, user):
+        message_id = reaction.message.id
+        
+        signal_entry = None
+        signal_id = None
+        for sid, data in self.pending_signals.items():
+            if data['message_id'] == message_id:
+                signal_entry = data
+                signal_id = sid
+                break
+        
+        if not signal_entry or datetime.now() > signal_entry['expires_at']:
+            return
+        
+        if reaction.emoji == '✅':
+            await self.execute_signal(signal_entry['data'], reaction.message.channel)
+            del self.pending_signals[signal_id]
+        elif reaction.emoji == '❌':
+            await reaction.message.channel.send(f"❌ Signal {signal_id} rejected")
+            del self.pending_signals[signal_id]
+
+    
+    def parse_signal_message(self, content: str) -> Optional[dict]:
+        """Parse signal using Pydantic model"""
+        from models import TradingSignalApproval
+        signal = TradingSignalApproval.from_discord_message(content)
+        if signal:
+            return signal.model_dump()
+        return None
+
+    @commands.command(name="pending")
+    async def show_pending_signals(self, ctx):
+        """Show all pending signals"""
+        if not self.pending_signals:
+            await ctx.send("No pending signals")
+            return
+        
+        for signal_id, data in self.pending_signals.items():
+            expires_str = data['expires_at'].strftime('%H:%M:%S')
+            await ctx.send(f"Signal: `{signal_id}` expires at {expires_str}")
+
+    ################## after reacting ###################
+    async def execute_signal(self, signal_data, channel):
+        """Mock execution with improved formatting"""
+        confidence_pct = signal_data['confidence'] * 100
+        
+        embed = discord.Embed(
+            title="🎯 MOCK EXECUTION",
+            description=f"**{signal_data['action']}** signal executed",
+            color=discord.Color.green(),
+            timestamp=datetime.now()
+        )
+        
+        embed.add_field(
+            name="📊 Signal Details",
+            value=f"**Action:** {signal_data['action']}\n"
+                f"**Pair:** {signal_data['pair']}\n"
+                f"**Confidence:** {confidence_pct:.1f}%",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="💰 Entry Prices", 
+            value=f"**BTC:** ${signal_data['btc_price']:,.2f}\n"
+                f"**ETH:** ${signal_data['eth_price']:,.2f}",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🔍 Parameters",
+            value=f"**Spread:** {signal_data['spread']:.6f}\n"
+                f"**Threshold:** ±{signal_data['threshold']:.6f}",
+            inline=False
+        )
+        
+        embed.set_footer(text=f"Signal ID: {signal_data['signal_id']}")
+        
+        await channel.send(embed=embed)
+
+
 
 
 async def setup(bot):

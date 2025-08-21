@@ -19,6 +19,17 @@ rich = "^13.9.4"
 pytest = "^8.3.5"
 python-dotenv = "^1.1.0"
 binance-connector = "^3.12.0"
+shell = "^1.0.1"
+streamlit = "^1.45.1"
+pandas = "^2.2.3"
+yfinance = "^0.2.61"
+plotly = "^6.1.1"
+quantstats = "^0.0.64"
+ipython = "^9.2.0"
+python-binance = "^1.0.29"
+xlsxwriter = "^3.2.3"
+ipykernel = "^6.29.5"
+pydantic = "^2.11.7"
 
 
 [tool.poetry.group.dev.dependencies]
