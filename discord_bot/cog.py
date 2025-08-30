@@ -188,6 +188,15 @@ class SimpleBot(commands.Cog):
             logger.error(f"Error in balance command: {str(e)}")
             await temp_msg.edit(content=f"Error fetching margin account data: {str(e)}")
     
+    ############### CHECK MINIMUM ###########
+    @commands.command(name="checkminimums")
+    async def check_minimums(self, ctx):
+        btc_info = self.client.exchange_info(symbol="BTCUSDC")
+        eth_info = self.client.exchange_info(symbol="ETHUSDC")
+        
+        for symbol, info in [("BTCUSDC", btc_info), ("ETHUSDC", eth_info)]:
+            lot_size = next(f for f in info['symbols'][0]['filters'] if f['filterType'] == 'LOT_SIZE')
+            await ctx.send(f"{symbol}: minQty={lot_size['minQty']}, stepSize={lot_size['stepSize']}")
 
 
 
@@ -720,44 +729,349 @@ class SimpleBot(commands.Cog):
 
     ################## after reacting ###################
     async def execute_signal(self, signal_data, channel):
-        """Mock execution with improved formatting"""
-        confidence_pct = signal_data['confidence'] * 100
+        """Execute real pairs trading instead of mock"""
+        try:
+            # Replace mock with real execution
+            await self.execute_pairs_trade(signal_data, channel)
+        except Exception as e:
+            logger.error(f"Pairs trade execution failed: {e}")
+            await channel.send(f"❌ Execution failed: {str(e)}")
+
+    ################## REAL EXECUITON #################
+
+    def spread_to_prices(self, target_spread, stop_spread, asset, beta):
+        """Convert spread levels to individual asset prices"""
+        # Placeholder - needs your spread calculation formula
+        # Depends on how spread is defined (log? arithmetic?)
+        pass
+
+    async def execute_pairs_trade(self, signal_data, channel):
+        """Execute actual pairs trading strategy"""
         
-        embed = discord.Embed(
-            title="🎯 MOCK EXECUTION",
-            description=f"**{signal_data['action']}** signal executed",
-            color=discord.Color.green(),
-            timestamp=datetime.now()
+        # Step 1: Get account balance
+        account_info = self.client.isolated_margin_account()
+        total_capital = self.extract_total_capital(account_info)  
+        
+        # Step 2: Calculate positions
+        positions = self.calculate_pair_positions(signal_data, total_capital)
+        logger.debug(f"Calculated positions: {positions}")
+
+        # Step 3: Place both limit orders simultaneously
+        btc_result, eth_result = await asyncio.gather(
+        self.place_pairs_limit_order(positions["btc"]),
+        self.place_pairs_limit_order(positions["eth"]),
+        return_exceptions=True
         )
         
-        embed.add_field(
-            name="📊 Signal Details",
-            value=f"**Action:** {signal_data['action']}\n"
-                f"**Pair:** {signal_data['pair']}\n"
-                f"**Confidence:** {confidence_pct:.1f}%",
-            inline=True
+        # Check results
+        if isinstance(btc_result, Exception):
+            await channel.send(f"BTC order failed: {btc_result}")
+        else:
+            await channel.send(f"BTC order placed: {btc_result.get('orderId', 'Unknown')}")
+            
+        if isinstance(eth_result, Exception):
+            await channel.send(f"ETH order failed: {eth_result}")
+        else:
+            await channel.send(f"ETH order placed: {eth_result.get('orderId', 'Unknown')}")
+
+    async def place_pairs_limit_order(self, position_data):
+        """Place limit order for one leg of the pair"""
+        try:
+            params = {
+                "symbol": position_data["symbol"],
+                "side": position_data["side"],
+                "type": "LIMIT",
+                "quantity": str(position_data["size"]),
+                "price": str(position_data["entry_price"]),
+                "isIsolated": "TRUE",
+                "sideEffectType": "AUTO_BORROW_REPAY",
+                "timeInForce": "GTC"
+            }
+            
+            order = self.client.new_margin_order(**params)
+            logger.info(f"Placed {position_data['side']} order for {position_data['symbol']}: {order['orderId']}")
+            return order
+            
+        except Exception as e:
+            logger.error(f"Failed to place order for {position_data['symbol']}: {e}")
+            raise
+
+    def extract_total_capital(self, account_info):
+        """Extract total USD value from isolated margin account"""
+        assets = account_info.get("assets", [])
+        for asset in assets:
+            if asset.get("symbol") == "BTCUSDC":
+                btc_asset = asset.get("baseAsset", {})
+                usdc_asset = asset.get("quoteAsset", {})
+                btc_price = float(asset.get("indexPrice", 108000))
+                
+                btc_total = float(btc_asset.get("totalAsset", 0))
+                usdc_total = float(usdc_asset.get("totalAsset", 0))
+                
+                return (btc_total * btc_price) + usdc_total
+        return 0
+
+    async def monitor_pairs_execution(self, btc_order, eth_order, signal_data, channel):
+        """Monitor fills and handle partial execution"""
+        
+        # Wait 5 seconds for initial fills
+        await asyncio.sleep(5)
+        
+        # Check order status
+        btc_status = self.client.query_margin_order(
+            symbol="BTCUSDC", 
+            orderId=btc_order['orderId'],
+            isIsolated=True
         )
         
-        embed.add_field(
-            name="💰 Entry Prices", 
-            value=f"**BTC:** ${signal_data['btc_price']:,.2f}\n"
-                f"**ETH:** ${signal_data['eth_price']:,.2f}",
-            inline=True
+        eth_status = self.client.query_margin_order(
+            symbol="ETHUSDC",
+            orderId=eth_order['orderId'], 
+            isIsolated=True
         )
         
-        embed.add_field(
-            name="🔍 Parameters",
-            value=f"**Spread:** {signal_data['spread']:.6f}\n"
-                f"**Threshold:** ±{signal_data['threshold']:.6f}",
-            inline=False
-        )
+        btc_filled = btc_status['status'] == 'FILLED'
+        eth_filled = eth_status['status'] == 'FILLED'
         
-        embed.set_footer(text=f"Signal ID: {signal_data['signal_id']}")
+        if btc_filled and eth_filled:
+            # Both filled - set up OCO orders
+            await channel.send("✅ Both legs filled. Setting up OCO orders...")
+            # Placeholder for OCO setup
+            await self.setup_pairs_oco(btc_order, eth_order, signal_data)
+            
+        elif btc_filled or eth_filled:
+            # Only one filled - emergency exit
+            await channel.send("⚠️ Only one leg filled. Executing emergency exit...")
+            await self.emergency_exit_single_leg(
+                btc_order if btc_filled else None,
+                eth_order if eth_filled else None,
+                channel
+            )
+        else:
+            # Neither filled - cancel both
+            await channel.send("⏰ Orders not filled. Cancelling...")
+            self.client.cancel_margin_order(symbol="BTCUSDC", orderId=btc_order['orderId'], isIsolated=True)
+            self.client.cancel_margin_order(symbol="ETHUSDC", orderId=eth_order['orderId'], isIsolated=True)
+
+    async def emergency_exit_single_leg(self, filled_order, unfilled_order, channel):
+        """Close the filled position immediately"""
+        if filled_order:
+            symbol = "BTCUSDC" if "BTC" in str(filled_order) else "ETHUSDC"
+            
+            # Reverse the position with market order
+            original_side = filled_order['side']
+            reverse_side = "SELL" if original_side == "BUY" else "BUY"
+            
+            params = {
+                "symbol": symbol,
+                "side": reverse_side,
+                "type": "MARKET",
+                "quantity": filled_order['executedQty'],
+                "isIsolated": "TRUE",
+                "sideEffectType": "AUTO_BORROW_REPAY"
+            }
+            
+            self.client.new_margin_order(**params)
+            await channel.send(f"🔄 Reversed {symbol} position")
         
-        await channel.send(embed=embed)
+        # Cancel the unfilled order
+        if unfilled_order:
+            symbol = "BTCUSDC" if "BTC" in str(unfilled_order) else "ETHUSDC"
+            self.client.cancel_margin_order(
+                symbol=symbol,
+                orderId=unfilled_order['orderId'],
+                isIsolated=True
+            )
+
+    async def setup_pairs_oco(self, btc_order, eth_order, signal_data):
+        """Set up OCO orders for pairs trade based on spread levels"""
+        
+        # Extract spread parameters
+        entry_spread = signal_data['spread']
+        threshold = signal_data['threshold']
+        mu = signal_data['mu']
+        action = signal_data['action']
+        
+        # Calculate spread-based TP/SL levels
+        # For LONG spread: profit when spread decreases, loss when increases
+        # For SHORT spread: opposite
+        
+        if action == "LONG":
+            # Target: spread returns toward mean
+            target_spread = entry_spread - (threshold * 0.5)  # 50% mean reversion
+            stop_spread = entry_spread + (threshold * 1.5)    # 150% further divergence
+        else:  # SHORT
+            target_spread = entry_spread + (threshold * 0.5)
+            stop_spread = entry_spread - (threshold * 1.5)
+        
+        # Convert spread levels back to individual asset prices
+        # This requires solving: spread = btc_price - beta * eth_price
+        btc_filled_price = float(btc_order['fills'][0]['price'])
+        eth_filled_price = float(eth_order['fills'][0]['price'])
+        beta = signal_data['beta']
+        
+        # Calculate individual TP/SL prices maintaining the hedge ratio
+        # Placeholder for complex calculation - depends on spread definition
+        btc_tp, btc_sl = self.spread_to_prices(target_spread, stop_spread, "BTC", beta)
+        eth_tp, eth_sl = self.spread_to_prices(target_spread, stop_spread, "ETH", beta)
+        
+        # Place OCO for BTC
+        btc_oco_params = {
+            "symbol": "BTCUSDC",
+            "side": "SELL" if btc_order['side'] == "BUY" else "BUY",
+            "quantity": btc_order['executedQty'],
+            "price": str(btc_tp),
+            "stopPrice": str(btc_sl),
+            "isIsolated": "TRUE",
+            "sideEffectType": "AUTO_BORROW_REPAY"
+        }
+        
+        # Place OCO for ETH
+        eth_oco_params = {
+            "symbol": "ETHUSDC", 
+            "side": "SELL" if eth_order['side'] == "BUY" else "BUY",
+            "quantity": eth_order['executedQty'],
+            "price": str(eth_tp),
+            "stopPrice": str(eth_sl),
+            "isIsolated": "TRUE",
+            "sideEffectType": "AUTO_BORROW_REPAY"
+        }
+        
+        btc_oco = self.client.new_margin_oco_order(**btc_oco_params)
+        eth_oco = self.client.new_margin_oco_order(**eth_oco_params)
+        
+        logger.info(f"OCO orders placed for spread TP: {target_spread}, SL: {stop_spread}")
+    
+    def calculate_pair_positions(self, signal_data: dict, total_capital: float , capital_allocation:float = 0.10) -> dict:
+        """
+        Calculate position sizes for pairs trading based on beta hedge ratio
+
+        For LONG spread: Buy BTC, Sell ETH
+        For SHORT spread: Sell BTC, Buy ETH
+        """
+        # Extract parameters
+        beta = signal_data['beta']
+        btc_price = signal_data['btc_price'] 
+        eth_price = signal_data['eth_price']
+        action = signal_data['action']  # LONG or SHORT
+
+        # 10% capital allocation
+        allocated_capital = total_capital * capital_allocation
+
+        # Calculate dollar allocation for each leg
+        # Total = btc_allocation + eth_allocation
+        # eth_allocation = beta * btc_allocation (in dollar terms)
+        # So: allocated_capital = btc_allocation * (1 + beta)
+
+        btc_dollar_allocation = allocated_capital / (1 + beta)
+        eth_dollar_allocation = beta * btc_dollar_allocation
+
+        # Convert to position sizes
+        btc_size = btc_dollar_allocation / btc_price
+        eth_size = eth_dollar_allocation / eth_price
+
+        def round_to_step_size(quantity, step_size):
+            return round(quantity / step_size) * step_size
+
+        btc_size = round_to_step_size(btc_size, 0.00001)
+        eth_size = round_to_step_size(eth_size, 0.0001)
+
+        # Determine sides based on signal
+        if action == "LONG":  # Long the spread
+            btc_side = "BUY"
+            eth_side = "SELL"
+        else:  # SHORT spread
+            btc_side = "SELL" 
+            eth_side = "BUY"
+
+        # In calculate_pair_positions, before return:
+        logger.info(f"Calculated BTC size: {btc_size:.8f}, ETH size: {eth_size:.8f}")
+        logger.info(f"BTC dollar allocation: ${btc_dollar_allocation:.2f}")
+        logger.info(f"ETH dollar allocation: ${eth_dollar_allocation:.2f}")
+
+        return {
+            "btc": {
+                "symbol": "BTCUSDC",
+                "side": btc_side,
+                "size": round(btc_size, 8),  # Round to 8 decimals
+                "entry_price": btc_price,
+                "dollar_value": btc_dollar_allocation
+            },
+            "eth": {
+                "symbol": "ETHUSDC",
+                "side": eth_side,
+                "size": round(eth_size, 8),
+                "entry_price": eth_price,
+                "dollar_value": eth_dollar_allocation
+            },
+            "total_allocated": allocated_capital,
+            "hedge_ratio": beta
+        }
 
 
+    @commands.command(name="testpairs")
+    async def test_pairs_execution(self, ctx):
+        """Test pairs trading with dummy signal"""
+        
+        # Create test signal with small allocation
+        test_signal = {
+            "signal_id": "test_001",
+            "action": "LONG",
+            "pair": "BTCUSDC/ETHUSDC",
+            "confidence": 0.5,
+            "spread": 0.001499,
+            "threshold": 0.000866,
+            "beta": 2.3695,
+            "mu": -1.341093,
+            "btc_price": 108010.0,
+            "eth_price": 2702.6,
+            "timestamp": datetime.now(),
+            "expires_minutes": 60
+        }
+        
+        # Test position calculation
+        try:
+            account_info = self.client.isolated_margin_account()
+            total_capital = self.extract_total_capital(account_info)
+            positions = self.calculate_pair_positions(test_signal, total_capital)
+            
+            await ctx.send(f"""
+    **Test Position Calculation:**
+    Total Capital: ${total_capital:.2f}
+    Allocated (1%): ${positions['total_allocated']:.2f}
+    BTC: {positions['btc']['side']} {positions['btc']['size']:.8f} @ ${positions['btc']['entry_price']}
+    ETH: {positions['eth']['side']} {positions['eth']['size']:.8f} @ ${positions['eth']['entry_price']}
+    Beta: {positions['hedge_ratio']:.4f}
+            """)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Test failed: {e}")
 
+    @commands.command(name="testpairslive")
+    async def test_pairs_live(self, ctx):
+        """Test with real limit orders (small amounts)"""
+        
+        test_signal = {
+            "signal_id": "test_live_001",
+            "action": "LONG",
+            "pair": "BTCUSDC/ETHUSDC",
+            "confidence": 0.5,
+            "spread": 0.001499,
+            "threshold": 0.000866,
+            "beta": 2.3695,
+            "mu": -1.341093,
+            "btc_price": 108010.0,
+            "eth_price": 2702.6,
+            "timestamp": datetime.now(),
+            "expires_minutes": 60
+        }
+        
+        await ctx.send("⚠️ Placing REAL test orders with 10% allocation...")
+        
+        try:
+            await self.execute_pairs_trade(test_signal, ctx.channel)
+        except Exception as e:
+            await ctx.send(f"Test failed: {e}")
 
 async def setup(bot):
     """Add the TradingCommands cog to the bot"""

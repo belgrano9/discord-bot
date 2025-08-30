@@ -12,8 +12,8 @@ class TradingSignalApproval(BaseModel):
     confidence: float  # 0.0-1.0
     spread: float
     threshold: float
-    beta: float
-    mu: float
+    beta: float #hedge ratio
+    mu: float #mean reversion param
     btc_price: float
     eth_price: float
     timestamp: datetime
@@ -62,3 +62,18 @@ Signal ID: {self.signal_id} • Awaiting Approval • {self.timestamp.strftime('
         except Exception:
             pass
         return None
+    
+
+class PairsTradingSignal(TradingSignalApproval):
+    beta: float  # hedge ratio
+    mu: float    # mean reversion parameter
+    # Inherits all other fields
+    
+    def calculate_position_sizes(self, total_capital: float) -> dict:
+        """Calculate position sizes based on beta and capital allocation"""
+        allocation = total_capital * 0.10  # 10% allocation
+        # Placeholder for position sizing logic
+        return {
+            "btc_size": ...,
+            "eth_size": ...
+        }

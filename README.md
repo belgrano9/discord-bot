@@ -107,13 +107,22 @@ This Discord bot integrates with financial market APIs to provide real-time data
 
 ## Technical Architecture
 
-The bot is built with several integrated components:
+Based on my analysis, here's an overview of the repository's architecture:
 
-* **Discord.py** : Core framework for Discord integration
-* **API Clients** : Custom clients for financial data APIs and exchange APIs
-* **Database** : Local file storage for configuration and historical data
-* **Scheduled Tasks** : Background tasks for alerts, reports, and price tracking
-* **WebSocket Integration** : Real-time data streaming for live crypto prices
+*   **Core Application:** A Python-based Discord bot using the `discord.py` library.
+*   **Entry Point:** `discord_bot/bot.py` initializes the bot and loads the cogs.
+*   **Modularity:** The bot's commands and functionality are organized into "cogs" (`discord_bot/cog.py`), which is a standard practice for `discord.py` bots.
+*   **Financial Data:** The bot integrates with multiple financial data sources and exchanges:
+    *   **Binance:** For trading, account information, and market data.
+    *   **KuCoin:** The `README.md` mentions KuCoin integration, and there's a test file for it.
+    *   **Bitvavo:** Also mentioned in the `README.md` and has a corresponding library in the dependencies.
+    *   **Other Financial Data:** The `yfinance` library and a "Financial Datasets API" are used for stock market data.
+*   **Data Processing:** The `polars` and `pandas` libraries are used for efficient data manipulation, likely for processing the financial data fetched from the APIs.
+*   **Web Components:** The `webapp` directory contains scripts and potentially interactive web applications (using `gradio` or `streamlit`) for tasks like data fetching, fee calculation, and data analysis. These are likely for supporting the development and testing of the bot, or for providing separate web-based interfaces for some of the bot's functionality.
+*   **Containerization:** The `Dockerfile` and `docker-compose.yml` files indicate that the application is designed to be deployed using Docker containers, which is a modern and reliable way to run applications in production.
+*   **Testing:** The `tests` directory contains unit and integration tests, which is a good practice for ensuring the code's quality and reliability.
+
+In short, this is a comprehensive financial Discord bot with a modular architecture, multiple exchange integrations, and supporting web components for data analysis and testing. It's a well-structured project that follows good software engineering practices.
 
 ### Exchange Integrations
 
