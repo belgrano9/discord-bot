@@ -355,7 +355,7 @@ class CrossMarginBot(commands.Cog):
         
         return total_usd
 
-    def calculate_pair_positions(self, signal_data: dict, total_capital: float, capital_allocation: float = 0.10) -> dict:
+    def calculate_pair_positions(self, signal_data: dict, total_capital: float, capital_allocation: float = 0.20) -> dict:
         """Calculate position sizes for pairs trading"""
         beta = signal_data['beta']
         btc_price = signal_data['btc_price']
@@ -754,6 +754,210 @@ ETH: {positions['eth']['side']} {positions['eth']['size']:.8f} (${positions['eth
         except Exception as e:
             await ctx.send(f"❌ Test failed: {e}")
 
+    @commands.Cog.listener()
+    async def on_reaction_add(self, reaction, user):
+        """Handle signal approval reactions"""
+        if user.bot or str(reaction.emoji) != '✅':
+            return
+            
+        # Find the pending signal for this message
+        signal_data = None
+        signal_id = None
+        
+        for sid, stored_signal in self.pending_signals.items():
+            if stored_signal['message_id'] == reaction.message.id:
+                signal_data = stored_signal['data']
+                signal_id = sid
+                break
+        
+        if not signal_data:
+            return
+            
+        # Convert signal to pairs trade execution
+        await self.execute_signal_as_pairs_trade(signal_data, reaction.message.channel)
+        
+        # Clean up
+        del self.pending_signals[signal_id]
+
+    async def execute_signal_as_pairs_trade(self, signal_data, channel):
+        """Convert signal parameters to pairs trade execution"""
+        
+        action = signal_data['action']  # "LONG" or "SHORT" 
+        beta = signal_data['beta']      # 2.3695
+        btc_price = signal_data['btc_price']
+        eth_price = signal_data['eth_price']
+        
+        # Calculate position sizes based on your capital allocation
+        account_info = self.client.margin_account()
+        total_capital = self.extract_total_capital(account_info)
+        positions = self.calculate_pair_positions(signal_data, total_capital,capital_allocation=0.5)
+        
+        # Extract the calculated amounts and sides
+        btc_amount = positions['btc']['size']
+        eth_amount = positions['eth']['size'] 
+        btc_side = positions['btc']['side']
+        eth_side = positions['eth']['side']
+        
+        # Execute using your existing pairs command logic
+        await self.pairs_trade_execution(btc_amount, eth_amount, btc_side, eth_side, channel)
+
+
+    async def pairs_trade_execution(self, btc_amount: float, eth_amount: float, btc_side: str, eth_side: str, tp_percent: float, sl_percent: float, channel):
+        """
+        Execute pairs trade with 2 entries + 2 OCOs
+        
+        Args:
+            btc_amount: Amount of BTC to trade
+            eth_amount: Amount of ETH to trade  
+            btc_side: BTC side (BUY/SELL)
+            eth_side: ETH side (BUY/SELL)
+            tp_percent: Take profit percentage
+            sl_percent: Stop loss percentage
+            channel: Discord channel to send updates to
+        """
+        try:
+            # Check minimum notionals first
+            btc_ticker = self.client.ticker_price(symbol="BTCUSDC")
+            eth_ticker = self.client.ticker_price(symbol="ETHUSDC")
+            
+            btc_price = float(btc_ticker["price"])
+            eth_price = float(eth_ticker["price"])
+            
+            btc_notional = btc_amount * btc_price
+            eth_notional = eth_amount * eth_price
+            
+            min_notional = 5  # Binance minimum is usually ~$5
+            
+            if btc_notional < min_notional:
+                await channel.send(f"❌ BTC order too small: ${btc_notional:.2f} < ${min_notional}")
+                return {"success": False, "error": "BTC notional too small"}
+                
+            if eth_notional < min_notional:
+                await channel.send(f"❌ ETH order too small: ${eth_notional:.2f} < ${min_notional}")
+                return {"success": False, "error": "ETH notional too small"}
+            
+            await channel.send(f"📊 Order sizes: BTC=${btc_notional:.2f}, ETH=${eth_notional:.2f}")
+        
+            # Entry orders
+            btc_order = self.client.new_margin_order(
+                symbol="BTCUSDC",
+                side=btc_side.upper(),
+                type="MARKET",
+                quantity=str(btc_amount),
+                sideEffectType="AUTO_BORROW_REPAY"
+            )
+            await channel.send(f"✅ BTC {btc_side}: {btc_order['orderId']}")
+            
+            eth_order = self.client.new_margin_order(
+                symbol="ETHUSDC",
+                side=eth_side.upper(),
+                type="MARKET",
+                quantity=str(eth_amount),
+                sideEffectType="AUTO_BORROW_REPAY"
+            )
+            await channel.send(f"✅ ETH {eth_side}: {eth_order['orderId']}")
+            
+            # Get executed prices
+            btc_price = float(btc_order['cummulativeQuoteQty']) / float(btc_order['executedQty'])
+            eth_price = float(eth_order['cummulativeQuoteQty']) / float(eth_order['executedQty'])
+            
+            # Calculate TP/SL levels
+            btc_tp = btc_price * (1 + tp_percent/100) if btc_side.upper() == "BUY" else btc_price * (1 - tp_percent/100)
+            btc_sl = btc_price * (1 - sl_percent/100) if btc_side.upper() == "BUY" else btc_price * (1 + sl_percent/100)
+            
+            eth_tp = eth_price * (1 + tp_percent/100) if eth_side.upper() == "BUY" else eth_price * (1 - tp_percent/100)
+            eth_sl = eth_price * (1 - sl_percent/100) if eth_side.upper() == "BUY" else eth_price * (1 + sl_percent/100)
+            
+            # Place OCO orders
+            btc_oco = self.client.new_margin_oco_order(
+                symbol="BTCUSDC",
+                side="SELL" if btc_side.upper() == "BUY" else "BUY",
+                quantity=str(btc_amount),
+                price=str(round(btc_tp, 2)),
+                stopPrice=str(round(btc_sl, 2)),
+                sideEffectType="AUTO_BORROW_REPAY"
+            )
+            await channel.send(f"✅ BTC OCO: {btc_oco['orderListId']}")
+            
+            eth_oco = self.client.new_margin_oco_order(
+                symbol="ETHUSDC",
+                side="SELL" if eth_side.upper() == "BUY" else "BUY",
+                quantity=str(eth_amount),
+                price=str(round(eth_tp, 2)),
+                stopPrice=str(round(eth_sl, 2)),
+                sideEffectType="AUTO_BORROW_REPAY"
+            )
+            await channel.send(f"✅ ETH OCO: {eth_oco['orderListId']}")
+            
+            # Create summary embed
+            embed = discord.Embed(
+                title="Pairs Trade Executed", 
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+            embed.add_field(
+                name="BTC", 
+                value=f"{btc_side.upper()} @ ${btc_price:.2f}\nTP: ${btc_tp:.2f}\nSL: ${btc_sl:.2f}", 
+                inline=True
+            )
+            embed.add_field(
+                name="ETH", 
+                value=f"{eth_side.upper()} @ ${eth_price:.2f}\nTP: ${eth_tp:.2f}\nSL: ${eth_sl:.2f}", 
+                inline=True
+            )
+            
+            await channel.send(embed=embed)
+            
+            return {
+                "success": True,
+                "btc_order_id": btc_order['orderId'],
+                "eth_order_id": eth_order['orderId'],
+                "btc_oco_id": btc_oco['orderListId'],
+                "eth_oco_id": eth_oco['orderListId'],
+                "btc_price": btc_price,
+                "eth_price": eth_price
+            }
+            
+        except Exception as e:
+            logger.error(f"Pairs trade execution failed: {e}")
+            await channel.send(f"❌ Pairs trade error: {str(e)}")
+            return {"success": False, "error": str(e)}
+
+
+    async def execute_signal_as_pairs_trade(self, signal_data, channel):
+        """Convert signal to pairs trade"""
+        account_info = self.client.margin_account()
+        total_capital = self.extract_total_capital(account_info)
+        positions = self.calculate_pair_positions(signal_data, total_capital)
+        
+        # Default TP/SL for signals (configurable)
+        tp_percent = 1.5
+        sl_percent = 1.0
+        
+        result = await self.pairs_trade_execution(
+            positions['btc']['size'],
+            positions['eth']['size'], 
+            positions['btc']['side'],
+            positions['eth']['side'],
+            tp_percent,
+            sl_percent,
+            channel
+        )
+        
+        if result["success"]:
+            await channel.send(f"🎯 Signal executed successfully: {signal_data['signal_id']}")
+        else:
+            await channel.send(f"❌ Signal execution failed: {signal_data['signal_id']}")
+
+    @commands.command(name="pairs")
+    async def execute_pairs(self, ctx, btc_amount: float, eth_amount: float, btc_side: str, eth_side: str, tp_percent: float = 1.5, sl_percent: float = 1.0):
+        """
+        Execute pairs trade with 2 entries + 2 OCOs
+        
+        Example:
+        !pairs 0.0002 0.01 SELL BUY 1.5 1.0
+        """
+        await self.pairs_trade_execution(btc_amount, eth_amount, btc_side, eth_side, tp_percent, sl_percent, ctx)
 
 async def setup(bot):
     """Add the cross margin cog to the bot"""
