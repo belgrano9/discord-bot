@@ -756,8 +756,9 @@ ETH: {positions['eth']['side']} {positions['eth']['size']:.8f} (${positions['eth
 
     @commands.Cog.listener()
     async def on_reaction_add(self, reaction, user):
-        """Handle signal approval reactions"""
-        if user.bot or str(reaction.emoji) != '✅':
+        """Handle signal approval and rejection reactions"""
+        # Ignore bot reactions and only process ✅ or ❌
+        if user.bot or str(reaction.emoji) not in ['✅', '❌']:
             return
             
         # Find the pending signal for this message
@@ -770,14 +771,70 @@ ETH: {positions['eth']['side']} {positions['eth']['size']:.8f} (${positions['eth
                 signal_id = sid
                 break
         
+        # If no pending signal found, ignore
         if not signal_data:
             return
-            
-        # Convert signal to pairs trade execution
-        await self.execute_signal_as_pairs_trade(signal_data, reaction.message.channel)
         
-        # Clean up
+        # Handle approval (✅)
+        if str(reaction.emoji) == '✅':
+            await reaction.message.channel.send(f"✅ **Signal {signal_id} APPROVED** - Executing trade...")
+            
+            # Execute the pairs trade
+            await self.execute_signal_as_pairs_trade(signal_data, reaction.message.channel)
+            
+            # Clean up reactions and edit message to show executed
+            try:
+                await reaction.message.clear_reactions()
+                
+                # Edit the original message to show it was executed
+                original_content = reaction.message.content
+                executed_content = original_content.replace(
+                    "⚡ Action Required", 
+                    "✅ **EXECUTED** ⚡"
+                ).replace(
+                    "React with ✅ to APPROVE this signal\nReact with ❌ to REJECT this signal\n⏰ Expires in",
+                    f"**TRADE EXECUTED** by {user.display_name}\n⏰ Executed at"
+                )
+                
+                await reaction.message.edit(content=executed_content)
+                
+            except discord.Forbidden:
+                # Bot might not have permission to edit message or clear reactions
+                await reaction.message.channel.send("⚠️ Cannot edit original message (missing permissions)")
+        
+        # Handle rejection (❌)  
+        elif str(reaction.emoji) == '❌':
+            # 1. Send rejection message
+            await reaction.message.channel.send(f"❌ **Signal {signal_id} REJECTED** by {user.display_name}")
+            
+            try:
+                # 2. Remove reactions from original message
+                await reaction.message.clear_reactions()
+                
+                # 3. Edit original signal message to show rejection
+                original_content = reaction.message.content
+                rejected_content = original_content.replace(
+                    "🚨 **TRADING SIGNAL APPROVAL NEEDED** 🚨\n⏰ SIGNAL APPROVAL REQUIRED", 
+                    "❌ **TRADING SIGNAL REJECTED** ❌\n🚫 SIGNAL DECLINED"
+                ).replace(
+                    "⚡ Action Required", 
+                    "❌ **REJECTED** 🚫"
+                ).replace(
+                    "React with ✅ to APPROVE this signal\nReact with ❌ to REJECT this signal\n⏰ Expires in",
+                    f"**SIGNAL REJECTED** by {user.display_name}\n🚫 Rejected at"
+                )
+                
+                await reaction.message.edit(content=rejected_content)
+                
+            except discord.Forbidden:
+                # Bot might not have permission to edit message or clear reactions
+                await reaction.message.channel.send("⚠️ Cannot edit original message (missing permissions)")
+        
+        # Clean up the pending signal from memory (for both cases)
         del self.pending_signals[signal_id]
+
+
+
 
     async def execute_signal_as_pairs_trade(self, signal_data, channel):
         """Convert signal parameters to pairs trade execution"""
