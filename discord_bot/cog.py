@@ -454,9 +454,10 @@ class CrossMarginBot(commands.Cog):
         
         allocated_capital = total_capital * capital_allocation
         
-        btc_dollar_allocation = allocated_capital / (1 + beta)
-        eth_dollar_allocation = beta * btc_dollar_allocation
-        
+        # Corrected calculation to handle negative beta and ensure positive position sizes
+        btc_dollar_allocation = allocated_capital / (1 + abs(beta))
+        eth_dollar_allocation = btc_dollar_allocation * abs(beta)
+
         btc_size = btc_dollar_allocation / btc_price
         eth_size = eth_dollar_allocation / eth_price
         
@@ -470,12 +471,13 @@ class CrossMarginBot(commands.Cog):
         
         logger.debug(f"Rounded sizes - BTC: {btc_size:.8f}, ETH: {eth_size:.8f}")
         
+        # Corrected side determination based on action and beta sign
         if action == "LONG":
             btc_side = "BUY"
-            eth_side = "SELL"
-        else:
+            eth_side = "SELL" if beta > 0 else "BUY"
+        else:  # SHORT
             btc_side = "SELL"
-            eth_side = "BUY"
+            eth_side = "BUY" if beta > 0 else "SELL"
         
         result = {
             "btc": {
@@ -483,14 +485,14 @@ class CrossMarginBot(commands.Cog):
                 "side": btc_side,
                 "size": btc_size,
                 "entry_price": btc_price,
-                "dollar_value": btc_size * btc_price
+                "dollar_value": btc_dollar_allocation
             },
             "eth": {
                 "symbol": "ETHUSDC",
                 "side": eth_side,
                 "size": eth_size,
                 "entry_price": eth_price,
-                "dollar_value": eth_size * eth_price
+                "dollar_value": eth_dollar_allocation
             },
             "total_allocated": allocated_capital,
             "hedge_ratio": beta
