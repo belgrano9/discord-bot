@@ -446,8 +446,8 @@ class CrossMarginBot(commands.Cog):
         logger.debug(f"Calculating pair positions with capital: ${total_capital:.2f}, allocation: {capital_allocation*100}%")
         
         beta = signal_data['beta']
-        btc_price = signal_data['btc_price']
-        eth_price = signal_data['eth_price']
+        btc_price = signal_data['asset1_price'] 
+        eth_price = signal_data['asset2_price']
         action = signal_data['action']
         
         logger.debug(f"Signal parameters - Beta: {beta:.4f}, BTC: ${btc_price:.2f}, ETH: ${eth_price:.2f}, Action: {action}")
@@ -931,15 +931,15 @@ class CrossMarginBot(commands.Cog):
         
         action = signal_data['action']  # "LONG" or "SHORT" 
         beta = signal_data['beta']      # 2.3695
-        btc_price = signal_data['btc_price']
-        eth_price = signal_data['eth_price']
+        btc_price = signal_data['asset1_price']
+        eth_price = signal_data['asset2_price']
         
         logger.debug(f"Signal parameters - Action: {action}, Beta: {beta}, BTC: ${btc_price}, ETH: ${eth_price}")
         
         # Calculate position sizes based on your capital allocation
         account_info = self.client.margin_account()
         total_capital = self.extract_total_capital(account_info)
-        positions = self.calculate_pair_positions(signal_data, total_capital, capital_allocation=0.5)
+        positions = self.calculate_pair_positions(signal_data, total_capital, capital_allocation=0.25)
         
         # Extract the calculated amounts and sides
         btc_amount = positions['btc']['size']
@@ -950,7 +950,7 @@ class CrossMarginBot(commands.Cog):
         logger.info(f"Executing signal as pairs trade: BTC {btc_side} {btc_amount}, ETH {eth_side} {eth_amount}")
         
         # Execute using your existing pairs command logic
-        await self.pairs_trade_execution(btc_amount, eth_amount, btc_side, eth_side, channel)
+        await self.pairs_trade_execution(btc_amount, eth_amount, btc_side, eth_side, channel=channel, sl_percent=0.05)
 
     async def pairs_trade_execution(self, btc_amount: float, eth_amount: float, btc_side: str, eth_side: str, tp_percent: float, sl_percent: float, channel):
         """
@@ -1111,8 +1111,8 @@ class CrossMarginBot(commands.Cog):
             "threshold": 0.000866,
             "beta": 2.3695,
             "mu": -1.341093,
-            "btc_price": 108010.0,
-            "eth_price": 3400.0,
+            "asset1_price": 108010.0,
+            "asset2_price": 3400.0,
             "timestamp": datetime.now(),
             "expires_minutes": 60
         }
@@ -1166,8 +1166,8 @@ Beta: {positions['hedge_ratio']:.4f}
             "threshold": 0.000866,
             "beta": 2.3695,
             "mu": -1.341093,
-            "btc_price": 108010.0,
-            "eth_price": 3400.0,
+            "asset1_price": 108010.0,
+            "asset2_price": 3400.0,
             "timestamp": datetime.now(),
             "expires_minutes": 60
         }

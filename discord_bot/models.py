@@ -14,8 +14,8 @@ class TradingSignalApproval(BaseModel):
     threshold: float
     beta: float #hedge ratio
     mu: float #mean reversion param
-    btc_price: float
-    eth_price: float
+    asset1_price: float
+    asset2_price: float
     timestamp: datetime
     expires_minutes: int = 60
 
@@ -34,8 +34,8 @@ Threshold: ±{self.threshold:.6f}    Pair: {self.pair}
 Confidence: {confidence_pct:.1f}%
 
 💰 Entry Prices
-BTCUSDT: ${self.btc_price:.2f}
-ETHUSDT: ${self.eth_price:.2f}
+{self.pair.split('/')[0]}: ${self.asset1_price:.2f}
+{self.pair.split('/')[1]}: ${self.asset2_price:.2f}
 
 ⚡ Action Required
 React with ✅ to APPROVE this signal
