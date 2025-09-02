@@ -950,7 +950,7 @@ class CrossMarginBot(commands.Cog):
         logger.info(f"Executing signal as pairs trade: BTC {btc_side} {btc_amount}, ETH {eth_side} {eth_amount}")
         
         # Execute using your existing pairs command logic
-        await self.pairs_trade_execution(btc_amount, eth_amount, btc_side, eth_side, channel=channel, sl_percent=0.05)
+        await self.pairs_trade_execution(btc_amount, eth_amount, btc_side, eth_side, channel=channel, sl_percent=0.05, tp_percent=1.5)
 
     async def pairs_trade_execution(self, btc_amount: float, eth_amount: float, btc_side: str, eth_side: str, tp_percent: float, sl_percent: float, channel):
         """
