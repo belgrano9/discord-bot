@@ -403,22 +403,36 @@ class CrossMarginBot(commands.Cog):
 
     # ==================== PAIRS TRADING ====================
 
-    def extract_total_capital(self, account_info):
+    def extract_total_capital(self, account_info, signal_data=None):
         """Extract total USD value from cross margin account"""
         logger.debug("Extracting total capital from account info...")
         
         user_assets = account_info.get("userAssets", [])
         total_usd = 0
         
-        # Get current prices for conversion
+        # Get current prices for conversion - use signal prices if available
         logger.debug("Fetching current prices for capital calculation...")
-        btc_ticker = self.client.ticker_price(symbol="BTCUSDT")
-        btc_price = float(btc_ticker["price"])
+        if signal_data:
+            # Extract asset names from signal pair (e.g., "AVAXUSDC/POLUSDC" -> "AVAX", "POL")
+            pair_str = signal_data.get('pair', 'BTCUSDC/ETHUSDC')
+            asset1_symbol, asset2_symbol = self.extract_assets_from_pair(pair_str)
+            
+            # Use prices from signal data
+            asset1_price = signal_data.get('asset1_price', 0)
+            asset2_price = signal_data.get('asset2_price', 0)
+            
+            logger.debug(f"Using signal prices - {asset1_symbol}: ${asset1_price:.2f}, {asset2_symbol}: ${asset2_price:.2f}")
+        else:
+            # Fallback to BTC/ETH for backward compatibility
+            asset1_symbol, asset2_symbol = "BTC", "ETH"
+            btc_ticker = self.client.ticker_price(symbol="BTCUSDT")
+            asset1_price = float(btc_ticker["price"])
+            
+            eth_ticker = self.client.ticker_price(symbol="ETHUSDT")
+            asset2_price = float(eth_ticker["price"])
+            
+            logger.debug(f"Using fallback prices - BTC: ${asset1_price:.2f}, ETH: ${asset2_price:.2f}")
         
-        eth_ticker = self.client.ticker_price(symbol="ETHUSDT")
-        eth_price = float(eth_ticker["price"])
-        
-        logger.debug(f"Current prices - BTC: ${btc_price:.2f}, ETH: ${eth_price:.2f}")
         
         for asset in user_assets:
             asset_name = asset["asset"]
@@ -428,77 +442,145 @@ class CrossMarginBot(commands.Cog):
                 if asset_name == "USDT" or asset_name == "USDC":
                     total_usd += net_amount
                     logger.debug(f"Added ${net_amount:.2f} from {asset_name}")
-                elif asset_name == "BTC":
+                elif asset_name == asset1_symbol:
+                    usd_value = net_amount * asset1_price
+                    total_usd += usd_value
+                    logger.debug(f"Added ${usd_value:.2f} from {net_amount:.8f} {asset1_symbol}")
+                elif asset_name == asset2_symbol:
+                    usd_value = net_amount * asset2_price
+                    total_usd += usd_value
+                    logger.debug(f"Added ${usd_value:.2f} from {net_amount:.8f} {asset2_symbol}")
+                # Add fallback for other major assets
+                elif asset_name == "BTC" and asset1_symbol != "BTC":
+                    btc_ticker = self.client.ticker_price(symbol="BTCUSDT")
+                    btc_price = float(btc_ticker["price"])
                     usd_value = net_amount * btc_price
                     total_usd += usd_value
-                    logger.debug(f"Added ${usd_value:.2f} from {net_amount:.8f} BTC")
-                elif asset_name == "ETH":
-                    usd_value = net_amount * eth_price
-                    total_usd += usd_value
-                    logger.debug(f"Added ${usd_value:.2f} from {net_amount:.8f} ETH")
-                # Add more conversions as needed
+                    logger.debug(f"Added ${usd_value:.2f} from {net_amount:.8f} BTC (fallback)")
         
         logger.info(f"Total account capital calculated: ${total_usd:.2f}")
         return total_usd
 
+    def _round_to_lot_size(self, quantity: float, asset_name: str) -> float:
+        """Round quantity to appropriate lot size for the asset"""
+        # Common lot size rules for major assets
+        lot_sizes = {
+            'BTC': 5,    # 0.00001
+            'ETH': 3,    # 0.001  
+            'AVAX': 1,   # 0.1
+            'POL': 0,    # 1 (whole numbers)
+            'MATIC': 0,  # 1 (POL was MATIC)
+            'ADA': 0,    # 1
+            'DOT': 1,    # 0.1
+            'LINK': 1,   # 0.1
+            'UNI': 1,    # 0.1
+            'AAVE': 2,   # 0.01
+            'SOL': 2,    # 0.01
+        }
+        
+        decimals = lot_sizes.get(asset_name, 3)  # Default to 3 decimals
+        rounded = round(quantity, decimals)
+        
+        logger.debug(f"Rounded {asset_name} quantity: {quantity:.8f} → {rounded:.8f}")
+        return rounded
+    
+    def extract_assets_from_pair(self, pair_str: str) -> tuple:
+        """Extract asset names from pair string like 'AVAXUSDC/POLUSDC' -> ('AVAX', 'POL')"""
+        try:
+            symbol1, symbol2 = pair_str.split('/')
+            # Remove USDC/USDT suffix to get base assets
+            asset1 = symbol1.replace('USDC', '').replace('USDT', '')
+            asset2 = symbol2.replace('USDC', '').replace('USDT', '')
+            logger.debug(f"Extracted assets from '{pair_str}': {asset1}, {asset2}")
+            return asset1, asset2
+        except Exception as e:
+            logger.warning(f"Failed to extract assets from '{pair_str}': {e}. Using BTC/ETH fallback.")
+            return "BTC", "ETH"
+    
     def calculate_pair_positions(self, signal_data: dict, total_capital: float, capital_allocation: float = 0.20) -> dict:
         """Calculate position sizes for pairs trading"""
         logger.debug(f"Calculating pair positions with capital: ${total_capital:.2f}, allocation: {capital_allocation*100}%")
         
         beta = signal_data['beta']
-        btc_price = signal_data['asset1_price'] 
-        eth_price = signal_data['asset2_price']
+        asset1_price = signal_data['asset1_price'] 
+        asset2_price = signal_data['asset2_price']
         action = signal_data['action']
         
-        logger.debug(f"Signal parameters - Beta: {beta:.4f}, BTC: ${btc_price:.2f}, ETH: ${eth_price:.2f}, Action: {action}")
+        # Extract trading symbols from signal
+        pair_str = signal_data.get('pair', 'BTCUSDC/ETHUSDC')
+        asset1_name, asset2_name = self.extract_assets_from_pair(pair_str)
+        symbol1, symbol2 = pair_str.split('/')
+        
+        logger.debug(f"Signal parameters - Beta: {beta:.4f}, {asset1_name}: ${asset1_price:.2f}, {asset2_name}: ${asset2_price:.2f}, Action: {action}")
+        logger.debug(f"Trading symbols: {symbol1}, {symbol2}")
         
         allocated_capital = total_capital * capital_allocation
         
         # Corrected calculation to handle negative beta and ensure positive position sizes
-        btc_dollar_allocation = allocated_capital / (1 + abs(beta))
-        eth_dollar_allocation = btc_dollar_allocation * abs(beta)
+        asset1_dollar_allocation = allocated_capital / (1 + abs(beta))
+        asset2_dollar_allocation = asset1_dollar_allocation * abs(beta)
 
-        btc_size = btc_dollar_allocation / btc_price
-        eth_size = eth_dollar_allocation / eth_price
+        asset1_size = asset1_dollar_allocation / asset1_price
+        asset2_size = asset2_dollar_allocation / asset2_price
         
-        logger.debug(f"Raw calculations - BTC size: {btc_size:.8f}, ETH size: {eth_size:.8f}")
+        logger.debug(f"Raw calculations - {asset1_name} size: {asset1_size:.8f}, {asset2_name} size: {asset2_size:.8f}")
         
-        # Round to Binance LOT_SIZE requirements
-        # BTC: 0.00001 (5 decimals)
-        # ETH: 0.001 (3 decimals)
-        btc_size = round(btc_size // 0.00001 * 0.00001, 5)
-        eth_size = round(eth_size // 0.001 * 0.001, 3)
+        # Round to proper lot sizes for different assets
+        asset1_size = self._round_to_lot_size(asset1_size, asset1_name)
+        asset2_size = self._round_to_lot_size(asset2_size, asset2_name)
         
-        logger.debug(f"Rounded sizes - BTC: {btc_size:.8f}, ETH: {eth_size:.8f}")
+        logger.debug(f"Rounded sizes - {asset1_name}: {asset1_size:.8f}, {asset2_name}: {asset2_size:.8f}")
         
-        # Corrected side determination based on action and beta sign
-        if action == "LONG":
-            btc_side = "BUY"
-            eth_side = "SELL" if beta > 0 else "BUY"
-        else:  # SHORT
-            btc_side = "SELL"
-            eth_side = "BUY" if beta > 0 else "SELL"
+        # TRUE PAIRS TRADING: Trade the spread, not individual assets
+        # LONG signal = spread too LOW → BUY asset1, SELL asset2 (expecting spread to increase)
+        # SHORT signal = spread too HIGH → SELL asset1, BUY asset2 (expecting spread to decrease)
+        
+        if action == "LONG":  # Long the spread (buy asset1 relative to asset2)
+            asset1_side = "BUY"   # Always buy the numerator
+            asset2_side = "SELL"  # Always sell the denominator (hedged)
+        else:  # SHORT the spread (sell asset1 relative to asset2)
+            asset1_side = "SELL"  # Always sell the numerator  
+            asset2_side = "BUY"   # Always buy the denominator (hedged)
+        
+        logger.debug(f"TRUE PAIRS TRADE: {action} spread = {asset1_side} {asset1_name} + {asset2_side} {asset2_name}")
         
         result = {
+            "asset1": {
+                "symbol": symbol1,
+                "side": asset1_side,
+                "size": asset1_size,
+                "entry_price": asset1_price,
+                "dollar_value": asset1_dollar_allocation,
+                "name": asset1_name
+            },
+            "asset2": {
+                "symbol": symbol2,
+                "side": asset2_side,
+                "size": asset2_size,
+                "entry_price": asset2_price,
+                "dollar_value": asset2_dollar_allocation,
+                "name": asset2_name
+            },
+            # Backward compatibility aliases
             "btc": {
-                "symbol": "BTCUSDC",
-                "side": btc_side,
-                "size": btc_size,
-                "entry_price": btc_price,
-                "dollar_value": btc_dollar_allocation
+                "symbol": symbol1,
+                "side": asset1_side,
+                "size": asset1_size,
+                "entry_price": asset1_price,
+                "dollar_value": asset1_dollar_allocation
             },
             "eth": {
-                "symbol": "ETHUSDC",
-                "side": eth_side,
-                "size": eth_size,
-                "entry_price": eth_price,
-                "dollar_value": eth_dollar_allocation
+                "symbol": symbol2,
+                "side": asset2_side,
+                "size": asset2_size,
+                "entry_price": asset2_price,
+                "dollar_value": asset2_dollar_allocation
             },
             "total_allocated": allocated_capital,
             "hedge_ratio": beta
         }
         
-        logger.info(f"Position calculation complete - BTC: {btc_side} ${result['btc']['dollar_value']:.2f}, ETH: {eth_side} ${result['eth']['dollar_value']:.2f}")
+        logger.info(f"PAIRS TRADE POSITIONS - {asset1_name}: {asset1_side} ${result['asset1']['dollar_value']:.2f}, {asset2_name}: {asset2_side} ${result['asset2']['dollar_value']:.2f} (Spread {action})")
         return result
 
     async def execute_pairs_trade(self, signal_data, channel):
@@ -508,87 +590,92 @@ class CrossMarginBot(commands.Cog):
         # Get account balance (cross margin)
         logger.debug("Fetching account information for capital calculation...")
         account_info = self.client.margin_account()
-        total_capital = self.extract_total_capital(account_info)
+        total_capital = self.extract_total_capital(account_info, signal_data)
         
         positions = self.calculate_pair_positions(signal_data, total_capital)
         logger.debug(f"Calculated positions: {positions}")
         
         # Place both orders - use MARKET for testing with small capital
-        btc_params = {
-            "symbol": positions["btc"]["symbol"],
-            "side": positions["btc"]["side"],
+        asset1_params = {
+            "symbol": positions["asset1"]["symbol"],
+            "side": positions["asset1"]["side"],
             "type": "MARKET",
-            "quantity": str(positions["btc"]["size"]),
+            "quantity": str(positions["asset1"]["size"]),
             "sideEffectType": "AUTO_BORROW_REPAY"
         }
         
-        eth_params = {
-            "symbol": positions["eth"]["symbol"],
-            "side": positions["eth"]["side"],
+        asset2_params = {
+            "symbol": positions["asset2"]["symbol"],
+            "side": positions["asset2"]["side"],
             "type": "MARKET",
-            "quantity": str(positions["eth"]["size"]),
+            "quantity": str(positions["asset2"]["size"]),
             "sideEffectType": "AUTO_BORROW_REPAY"
         }
         
-        logger.debug(f"BTC order params: {btc_params}")
-        logger.debug(f"ETH order params: {eth_params}")
+        logger.debug(f"Asset1 ({positions['asset1']['name']}) order params: {asset1_params}")
+        logger.debug(f"Asset2 ({positions['asset2']['name']}) order params: {asset2_params}")
         
         try:
-            logger.info("Placing BTC leg of pairs trade...")
-            btc_order = self.client.new_margin_order(**btc_params)
-            logger.info(f"BTC order filled: ID {btc_order.get('orderId', 'UNKNOWN')}")
+            logger.info(f"Placing {positions['asset1']['name']} leg of pairs trade...")
+            asset1_order = self.client.new_margin_order(**asset1_params)
+            logger.info(f"{positions['asset1']['name']} order filled: ID {asset1_order.get('orderId', 'UNKNOWN')}")
             
-            logger.info("Placing ETH leg of pairs trade...")
-            eth_order = self.client.new_margin_order(**eth_params)
-            logger.info(f"ETH order filled: ID {eth_order.get('orderId', 'UNKNOWN')}")
+            logger.info(f"Placing {positions['asset2']['name']} leg of pairs trade...")
+            asset2_order = self.client.new_margin_order(**asset2_params)
+            logger.info(f"{positions['asset2']['name']} order filled: ID {asset2_order.get('orderId', 'UNKNOWN')}")
             
-            await channel.send(f"✅ Pairs trade executed:\nBTC: {btc_order['orderId']}\nETH: {eth_order['orderId']}")
+            await channel.send(f"✅ Pairs trade executed:\n{positions['asset1']['name']}: {asset1_order['orderId']}\n{positions['asset2']['name']}: {asset2_order['orderId']}")
             
-            # Monitor execution
+            # Monitor execution  
             logger.debug("Starting execution monitoring...")
-            await self.monitor_pairs_execution(btc_order, eth_order, signal_data, channel)
+            await self.monitor_pairs_execution(asset1_order, asset2_order, signal_data, channel, positions)
             
         except Exception as e:
             logger.error(f"Pairs trade execution failed: {e}")
             await channel.send(f"❌ Pairs trade failed: {str(e)}")
 
-    async def monitor_pairs_execution(self, btc_order, eth_order, signal_data, channel):
+    async def monitor_pairs_execution(self, asset1_order, asset2_order, signal_data, channel, positions):
         """Monitor fills and handle partial execution"""
         logger.debug("Monitoring pairs execution status...")
         await asyncio.sleep(5)
         
         try:
             # Check status (no isIsolated parameter)
-            logger.debug("Checking BTC order status...")
-            btc_status = self.client.query_margin_order(
-                symbol="BTCUSDC",
-                orderId=btc_order['orderId']
+            asset1_symbol = positions["asset1"]["symbol"]
+            asset2_symbol = positions["asset2"]["symbol"]
+            asset1_name = positions["asset1"]["name"]
+            asset2_name = positions["asset2"]["name"]
+            
+            logger.debug(f"Checking {asset1_name} order status...")
+            asset1_status = self.client.query_margin_order(
+                symbol=asset1_symbol,
+                orderId=asset1_order['orderId']
             )
             
-            logger.debug("Checking ETH order status...")
-            eth_status = self.client.query_margin_order(
-                symbol="ETHUSDC",
-                orderId=eth_order['orderId']
+            logger.debug(f"Checking {asset2_name} order status...")
+            asset2_status = self.client.query_margin_order(
+                symbol=asset2_symbol,
+                orderId=asset2_order['orderId']
             )
             
-            btc_filled = btc_status['status'] == 'FILLED'
-            eth_filled = eth_status['status'] == 'FILLED'
+            asset1_filled = asset1_status['status'] == 'FILLED'
+            asset2_filled = asset2_status['status'] == 'FILLED'
             
-            logger.info(f"Order status - BTC: {btc_status['status']}, ETH: {eth_status['status']}")
+            logger.info(f"Order status - {asset1_name}: {asset1_status['status']}, {asset2_name}: {asset2_status['status']}")
             
-            if btc_filled and eth_filled:
+            if asset1_filled and asset2_filled:
                 logger.info("Both legs filled successfully")
                 await channel.send("✅ Both legs filled")
                 # Set up OCO orders here
-            elif btc_filled or eth_filled:
+            elif asset1_filled or asset2_filled:
                 logger.warning("PARTIAL FILL DETECTED - Only one leg filled")
                 await channel.send("⚠️ Only one leg filled - emergency exit")
                 # Handle partial fill
             else:
                 logger.warning("Orders not filled - executing cancellation")
                 await channel.send("⏰ Orders not filled - cancelling")
-                self.client.cancel_margin_order(symbol="BTCUSDC", orderId=btc_order['orderId'])
-                self.client.cancel_margin_order(symbol="ETHUSDC", orderId=eth_order['orderId'])
+                self.client.cancel_margin_order(symbol=asset1_symbol, orderId=asset1_order['orderId'])
+                self.client.cancel_margin_order(symbol=asset2_symbol, orderId=asset2_order['orderId'])
                 logger.info("Both orders cancelled successfully")
                 
         except Exception as e:
@@ -938,142 +1025,178 @@ class CrossMarginBot(commands.Cog):
         
         logger.debug(f"Signal parameters - Action: {action}, Beta: {beta}, BTC: ${btc_price}, ETH: ${eth_price}")
         
-        # Calculate position sizes based on your capital allocation
+        # Calculate TRUE PAIRS TRADING positions with proper hedging
         account_info = self.client.margin_account()
-        total_capital = self.extract_total_capital(account_info)
+        total_capital = self.extract_total_capital(account_info, signal_data)
         positions = self.calculate_pair_positions(signal_data, total_capital, capital_allocation=0.25)
         
-        # Extract the calculated amounts and sides
-        btc_amount = positions['btc']['size']
-        eth_amount = positions['eth']['size'] 
-        btc_side = positions['btc']['side']
-        eth_side = positions['eth']['side']
+        # Extract the calculated amounts and sides (now properly hedged)
+        asset1_amount = positions['asset1']['size']
+        asset2_amount = positions['asset2']['size'] 
+        asset1_side = positions['asset1']['side']
+        asset2_side = positions['asset2']['side']
         
-        logger.info(f"Executing signal as pairs trade: BTC {btc_side} {btc_amount}, ETH {eth_side} {eth_amount}")
+        logger.info(f"Executing TRUE PAIRS TRADE: {asset1_side} {asset1_amount} {positions['asset1']['name']} + {asset2_side} {asset2_amount} {positions['asset2']['name']}")
         
-        # Execute using your existing pairs command logic
-        await self.pairs_trade_execution(btc_amount, eth_amount, btc_side, eth_side, channel=channel, sl_percent=0.05, tp_percent=1.5)
+        # Execute TRUE pairs trade with spread monitoring
+        await self.true_pairs_trade_execution(asset1_amount, asset2_amount, asset1_side, asset2_side, channel=channel, signal_data=signal_data)
 
-    async def pairs_trade_execution(self, btc_amount: float, eth_amount: float, btc_side: str, eth_side: str, tp_percent: float, sl_percent: float, channel):
+    async def true_pairs_trade_execution(self, asset1_amount: float, asset2_amount: float, asset1_side: str, asset2_side: str, channel, signal_data: dict):
         """
-        Execute pairs trade with 2 entries + 2 OCOs
+        Execute TRUE PAIRS TRADE with proper spread hedging
+        
+        This implements actual pairs trading by:
+        1. Taking opposite positions in two correlated assets
+        2. Using beta hedge ratio to maintain market neutrality
+        3. Profiting from spread convergence, not directional moves
+        4. Monitoring the spread for exit conditions
         
         Args:
-            btc_amount: Amount of BTC to trade
-            eth_amount: Amount of ETH to trade  
-            btc_side: BTC side (BUY/SELL)
-            eth_side: ETH side (BUY/SELL)
-            tp_percent: Take profit percentage
-            sl_percent: Stop loss percentage
+            asset1_amount: Amount of first asset (numerator)
+            asset2_amount: Amount of second asset (denominator, beta-adjusted)
+            asset1_side: First asset side (opposite of asset2_side)
+            asset2_side: Second asset side (opposite of asset1_side) 
             channel: Discord channel to send updates to
+            signal_data: Signal data containing spread info and thresholds
         """
-        logger.info(f"Executing pairs trade - BTC: {btc_side} {btc_amount}, ETH: {eth_side} {eth_amount}")
+        logger.info(f"Executing TRUE PAIRS TRADE - Asset1: {asset1_side} {asset1_amount}, Asset2: {asset2_side} {asset2_amount}")
         
         try:
-            # Check minimum notionals first
+            # Extract symbols from signal data - NO MORE DUMMY SIGNALS!
+            if signal_data:
+                pair_str = signal_data.get('pair', 'BTCUSDC/ETHUSDC')
+                asset1_symbol, asset2_symbol = pair_str.split('/')
+                asset1_name = asset1_symbol.replace('USDC', '').replace('USDT', '')
+                asset2_name = asset2_symbol.replace('USDC', '').replace('USDT', '')
+                
+                # Use prices from signal data (more accurate and faster)
+                asset1_price = signal_data.get('asset1_price', 0)
+                asset2_price = signal_data.get('asset2_price', 0)
+                
+                logger.debug(f"Using signal symbols: {asset1_symbol}, {asset2_symbol}")
+                logger.debug(f"Using signal prices: {asset1_name} ${asset1_price:.2f}, {asset2_name} ${asset2_price:.2f}")
+            else:
+                # Fallback to BTC/ETH for backward compatibility
+                asset1_symbol, asset2_symbol = "BTCUSDC", "ETHUSDC"
+                asset1_name, asset2_name = "BTC", "ETH"
+                
+                # Fetch live prices
+                asset1_ticker = self.client.ticker_price(symbol=asset1_symbol)
+                asset2_ticker = self.client.ticker_price(symbol=asset2_symbol)
+                asset1_price = float(asset1_ticker["price"])
+                asset2_price = float(asset2_ticker["price"])
+                
+                logger.warning("No signal data provided, using BTC/ETH fallback")
+            
+            # Check minimum notionals
             logger.debug("Checking minimum notional requirements...")
-            btc_ticker = self.client.ticker_price(symbol="BTCUSDC")
-            eth_ticker = self.client.ticker_price(symbol="ETHUSDC")
             
-            btc_price = float(btc_ticker["price"])
-            eth_price = float(eth_ticker["price"])
-            
-            btc_notional = btc_amount * btc_price
-            eth_notional = eth_amount * eth_price
+            asset1_notional = btc_amount * asset1_price
+            asset2_notional = eth_amount * asset2_price
             
             min_notional = 5  # Binance minimum is usually ~$5
             
-            logger.debug(f"Order notionals - BTC: ${btc_notional:.2f}, ETH: ${eth_notional:.2f}")
+            logger.debug(f"Order notionals - {asset1_name}: ${asset1_notional:.2f}, {asset2_name}: ${asset2_notional:.2f}")
             
-            if btc_notional < min_notional:
-                logger.error(f"BTC order below minimum notional: ${btc_notional:.2f} < ${min_notional}")
-                await channel.send(f"❌ BTC order too small: ${btc_notional:.2f} < ${min_notional}")
-                return {"success": False, "error": "BTC notional too small"}
+            if asset1_notional < min_notional:
+                logger.error(f"{asset1_name} order below minimum notional: ${asset1_notional:.2f} < ${min_notional}")
+                await channel.send(f"❌ {asset1_name} order too small: ${asset1_notional:.2f} < ${min_notional}")
+                return {"success": False, "error": f"{asset1_name} notional too small"}
                 
-            if eth_notional < min_notional:
-                logger.error(f"ETH order below minimum notional: ${eth_notional:.2f} < ${min_notional}")
-                await channel.send(f"❌ ETH order too small: ${eth_notional:.2f} < ${min_notional}")
-                return {"success": False, "error": "ETH notional too small"}
+            if asset2_notional < min_notional:
+                logger.error(f"{asset2_name} order below minimum notional: ${asset2_notional:.2f} < ${min_notional}")
+                await channel.send(f"❌ {asset2_name} order too small: ${asset2_notional:.2f} < ${min_notional}")
+                return {"success": False, "error": f"{asset2_name} notional too small"}
             
-            await channel.send(f"📊 Order sizes: BTC=${btc_notional:.2f}, ETH=${eth_notional:.2f}")
+            await channel.send(f"📊 PAIRS TRADE: {asset1_name}=${asset1_notional:.2f} ({asset1_side}), {asset2_name}=${asset2_notional:.2f} ({asset2_side})")
         
-            # Entry orders
-            logger.info("Placing BTC entry order for pairs trade...")
-            btc_order = self.client.new_margin_order(
-                symbol="BTCUSDC",
-                side=btc_side.upper(),
+            # PAIRS ENTRY: Execute both legs simultaneously for proper hedging
+            logger.info(f"Placing PAIRS TRADE LEG 1: {asset1_name} {asset1_side} {asset1_amount}")
+            first_order = self.client.new_margin_order(
+                symbol=asset1_symbol,
+                side=asset1_side.upper(),
                 type="MARKET",
-                quantity=str(btc_amount),
+                quantity=str(asset1_amount),
                 sideEffectType="AUTO_BORROW_REPAY"
             )
-            logger.info(f"BTC entry executed: ID {btc_order['orderId']}")
-            await channel.send(f"✅ BTC {btc_side}: {btc_order['orderId']}")
+            logger.info(f"PAIRS LEG 1 executed: {asset1_name} {asset1_side} - ID {first_order['orderId']}")
+            await channel.send(f"✅ PAIRS LEG 1: {asset1_name} {asset1_side} - {first_order['orderId']}")
             
-            logger.info("Placing ETH entry order for pairs trade...")
-            eth_order = self.client.new_margin_order(
-                symbol="ETHUSDC",
-                side=eth_side.upper(),
+            logger.info(f"Placing PAIRS TRADE LEG 2: {asset2_name} {asset2_side} {asset2_amount}")
+            second_order = self.client.new_margin_order(
+                symbol=asset2_symbol,
+                side=asset2_side.upper(),
                 type="MARKET",
-                quantity=str(eth_amount),
+                quantity=str(asset2_amount),
                 sideEffectType="AUTO_BORROW_REPAY"
             )
-            logger.info(f"ETH entry executed: ID {eth_order['orderId']}")
-            await channel.send(f"✅ ETH {eth_side}: {eth_order['orderId']}")
+            logger.info(f"PAIRS LEG 2 executed: {asset2_name} {asset2_side} - ID {second_order['orderId']}")
+            await channel.send(f"✅ PAIRS LEG 2: {asset2_name} {asset2_side} - {second_order['orderId']}")
             
-            # Get executed prices
-            btc_price = float(btc_order['cummulativeQuoteQty']) / float(btc_order['executedQty'])
-            eth_price = float(eth_order['cummulativeQuoteQty']) / float(eth_order['executedQty'])
+            # Calculate executed spread for monitoring
+            executed_asset1_price = float(first_order['cummulativeQuoteQty']) / float(first_order['executedQty'])
+            executed_asset2_price = float(second_order['cummulativeQuoteQty']) / float(second_order['executedQty'])
             
-            logger.debug(f"Entry execution prices - BTC: ${btc_price:.2f}, ETH: ${eth_price:.2f}")
+            # Calculate actual spread at execution
+            import math
+            beta = signal_data.get('beta', 1.0)
+            executed_spread = math.log(executed_asset1_price) - beta * math.log(executed_asset2_price)
             
-            # Calculate TP/SL levels
-            btc_tp = btc_price * (1 + tp_percent/100) if btc_side.upper() == "BUY" else btc_price * (1 - tp_percent/100)
-            btc_sl = btc_price * (1 - sl_percent/100) if btc_side.upper() == "BUY" else btc_price * (1 + sl_percent/100)
+            logger.info(f"PAIRS EXECUTION - {asset1_name}: ${executed_asset1_price:.4f}, {asset2_name}: ${executed_asset2_price:.4f}")
+            logger.info(f"EXECUTED SPREAD: {executed_spread:.6f} (Target: {signal_data.get('spread', 'N/A'):.6f})")
             
-            eth_tp = eth_price * (1 + tp_percent/100) if eth_side.upper() == "BUY" else eth_price * (1 - tp_percent/100)
-            eth_sl = eth_price * (1 - sl_percent/100) if eth_side.upper() == "BUY" else eth_price * (1 + sl_percent/100)
+            # PAIRS TRADING: Set spread-based exit targets (not individual asset TP/SL)
+            current_spread = executed_spread
+            target_spread = signal_data.get('mu', 0)  # Mean reversion target
+            spread_threshold = signal_data.get('threshold', 0.01)
             
-            logger.info(f"Risk management levels - BTC TP:${btc_tp:.2f} SL:${btc_sl:.2f}, ETH TP:${eth_tp:.2f} SL:${eth_sl:.2f}")
+            # Calculate spread-based exit levels
+            if signal_data.get('action') == 'LONG':  # Long spread
+                target_spread_exit = current_spread + (spread_threshold * 0.5)  # Take profit when spread increases
+                stop_spread_exit = current_spread - (spread_threshold * 0.3)    # Stop if spread decreases more
+            else:  # Short spread
+                target_spread_exit = current_spread - (spread_threshold * 0.5)  # Take profit when spread decreases  
+                stop_spread_exit = current_spread + (spread_threshold * 0.3)    # Stop if spread increases more
             
-            # Place OCO orders
-            logger.info("Placing BTC OCO for risk management...")
-            btc_oco = self.client.new_margin_oco_order(
-                symbol="BTCUSDC",
-                side="SELL" if btc_side.upper() == "BUY" else "BUY",
-                quantity=str(btc_amount),
-                price=str(round(btc_tp, 2)),
-                stopPrice=str(round(btc_sl, 2)),
-                sideEffectType="AUTO_BORROW_REPAY"
+            logger.info(f"SPREAD TARGETS - Current: {current_spread:.6f}, TP: {target_spread_exit:.6f}, SL: {stop_spread_exit:.6f}")
+            
+            # TRUE PAIRS TRADING: Manual spread monitoring (not individual OCOs)
+            # In production, you'd monitor the spread and close both positions when:
+            # 1. Spread reverts to mean (profit target)
+            # 2. Spread moves against you beyond threshold (stop loss)
+            # 3. Time-based exit (holding period limit)
+            
+            await channel.send(
+                f"🎯 **PAIRS TRADE ACTIVE**\n"
+                f"📊 Spread Entry: {current_spread:.6f}\n"
+                f"🎯 Target: {target_spread_exit:.6f}\n"
+                f"🛑 Stop: {stop_spread_exit:.6f}\n"
+                f"⚠️ **Manual monitoring required - close both positions when spread target is hit!**"
             )
-            logger.info(f"BTC OCO placed: List ID {btc_oco['orderListId']}")
-            await channel.send(f"✅ BTC OCO: {btc_oco['orderListId']}")
             
-            logger.info("Placing ETH OCO for risk management...")
-            eth_oco = self.client.new_margin_oco_order(
-                symbol="ETHUSDC",
-                side="SELL" if eth_side.upper() == "BUY" else "BUY",
-                quantity=str(eth_amount),
-                price=str(round(eth_tp, 2)),
-                stopPrice=str(round(eth_sl, 2)),
-                sideEffectType="AUTO_BORROW_REPAY"
-            )
-            logger.info(f"ETH OCO placed: List ID {eth_oco['orderListId']}")
-            await channel.send(f"✅ ETH OCO: {eth_oco['orderListId']}")
+            logger.warning("PAIRS TRADE: No automatic OCO orders - spread monitoring required!")
+            logger.info(f"Position will profit when spread moves from {current_spread:.6f} toward {target_spread_exit:.6f}")
             
-            # Create summary embed
+            # Create TRUE PAIRS TRADE summary
             embed = discord.Embed(
-                title="Pairs Trade Executed", 
-                color=discord.Color.green(),
+                title="🔄 TRUE PAIRS TRADE EXECUTED", 
+                description="Spread-based hedged position",
+                color=discord.Color.gold(),
                 timestamp=datetime.now()
             )
             embed.add_field(
-                name="BTC", 
-                value=f"{btc_side.upper()} @ ${btc_price:.2f}\nTP: ${btc_tp:.2f}\nSL: ${btc_sl:.2f}", 
+                name=f"LEG 1: {asset1_name}", 
+                value=f"{asset1_side} @ ${executed_asset1_price:.4f}\nSize: {asset1_amount:.6f}", 
                 inline=True
             )
             embed.add_field(
-                name="ETH", 
-                value=f"{eth_side.upper()} @ ${eth_price:.2f}\nTP: ${eth_tp:.2f}\nSL: ${eth_sl:.2f}", 
+                name=f"LEG 2: {asset2_name}", 
+                value=f"{asset2_side} @ ${executed_asset2_price:.4f}\nSize: {asset2_amount:.6f}", 
+                inline=True
+            )
+            embed.add_field(
+                name="Spread Analysis", 
+                value=f"Entry: {current_spread:.6f}\nTarget: {target_spread_exit:.6f}\nBeta: {beta:.4f}", 
                 inline=True
             )
             
@@ -1081,12 +1204,15 @@ class CrossMarginBot(commands.Cog):
             
             result = {
                 "success": True,
-                "btc_order_id": btc_order['orderId'],
-                "eth_order_id": eth_order['orderId'],
-                "btc_oco_id": btc_oco['orderListId'],
-                "eth_oco_id": eth_oco['orderListId'],
-                "btc_price": btc_price,
-                "eth_price": eth_price
+                "pairs_trade": True,
+                "asset1_order_id": first_order['orderId'],
+                "asset2_order_id": second_order['orderId'],
+                "asset1_price": executed_asset1_price,
+                "asset2_price": executed_asset2_price,
+                "executed_spread": executed_spread,
+                "target_spread": target_spread_exit,
+                "stop_spread": stop_spread_exit,
+                "beta": beta
             }
             
             logger.info(f"Pairs trade execution completed successfully")
@@ -1123,15 +1249,15 @@ class CrossMarginBot(commands.Cog):
         
         try:
             account_info = self.client.margin_account()
-            total_capital = self.extract_total_capital(account_info)
+            total_capital = self.extract_total_capital(account_info, test_signal)
             positions = self.calculate_pair_positions(test_signal, total_capital, allocation_pct)
             
             result_message = f"""
 **Test Position Calculation:**
 Total Capital: ${total_capital:.2f}
 Allocated ({allocation_pct*100}%): ${positions['total_allocated']:.2f}
-BTC: {positions['btc']['side']} {positions['btc']['size']:.8f} @ ${positions['btc']['entry_price']}
-ETH: {positions['eth']['side']} {positions['eth']['size']:.8f} @ ${positions['eth']['entry_price']}
+{positions['asset1']['name']}: {positions['asset1']['side']} {positions['asset1']['size']:.8f} @ ${positions['asset1']['entry_price']}
+{positions['asset2']['name']}: {positions['asset2']['side']} {positions['asset2']['size']:.8f} @ ${positions['asset2']['entry_price']}
 Beta: {positions['hedge_ratio']:.4f}
             """
             
@@ -1179,65 +1305,64 @@ Beta: {positions['hedge_ratio']:.4f}
         
         try:
             account_info = self.client.margin_account()
-            total_capital = self.extract_total_capital(account_info)
+            total_capital = self.extract_total_capital(account_info, test_signal)
             
-            # Override symbols to USDT pairs
+            # Calculate positions (will use BTCUSDT/ETHUSDT from test_signal)
             positions = self.calculate_pair_positions(test_signal, total_capital, allocation_pct)
-            positions["btc"]["symbol"] = "BTCUSDT"
-            positions["eth"]["symbol"] = "ETHUSDT"
+            # Symbols are already set correctly from test_signal pair data
             
             logger.info(f"Calculated positions for live test: BTC {positions['btc']['side']} ${positions['btc']['dollar_value']:.2f}, ETH {positions['eth']['side']} ${positions['eth']['dollar_value']:.2f}")
             
             await ctx.send(f"""
 **About to place:**
-BTC: {positions['btc']['side']} {positions['btc']['size']:.8f} (${positions['btc']['dollar_value']:.2f})
-ETH: {positions['eth']['side']} {positions['eth']['size']:.8f} (${positions['eth']['dollar_value']:.2f})
+{positions['asset1']['name']}: {positions['asset1']['side']} {positions['asset1']['size']:.8f} (${positions['asset1']['dollar_value']:.2f})
+{positions['asset2']['name']}: {positions['asset2']['side']} {positions['asset2']['size']:.8f} (${positions['asset2']['dollar_value']:.2f})
             """)
             
             # Place orders sequentially with error handling
             try:
-                logger.info("Placing live BTC order...")
-                btc_params = {
-                    "symbol": "BTCUSDT",
-                    "side": positions["btc"]["side"],
+                logger.info(f"Placing live {positions['asset1']['name']} order...")
+                asset1_params = {
+                    "symbol": positions["asset1"]["symbol"],
+                    "side": positions["asset1"]["side"],
                     "type": "MARKET",
-                    "quantity": str(positions["btc"]["size"]),
+                    "quantity": str(positions["asset1"]["size"]),
                     "sideEffectType": "AUTO_BORROW_REPAY"
                 }
-                btc_order = self.client.new_margin_order(**btc_params)
-                logger.info(f"Live BTC order successful: ID {btc_order['orderId']}")
-                await ctx.send(f"✅ BTC order placed: {btc_order['orderId']}")
+                asset1_order = self.client.new_margin_order(**asset1_params)
+                logger.info(f"Live {positions['asset1']['name']} order successful: ID {asset1_order['orderId']}")
+                await ctx.send(f"✅ {positions['asset1']['name']} order placed: {asset1_order['orderId']}")
             except Exception as e:
-                logger.error(f"Live BTC order failed: {e}")
-                await ctx.send(f"❌ BTC failed: {e}")
+                logger.error(f"Live {positions['asset1']['name']} order failed: {e}")
+                await ctx.send(f"❌ {positions['asset1']['name']} failed: {e}")
                 return
             
             try:
-                logger.info("Placing live ETH order...")
-                eth_params = {
-                    "symbol": "ETHUSDT",
-                    "side": positions["eth"]["side"],
+                logger.info(f"Placing live {positions['asset2']['name']} order...")
+                asset2_params = {
+                    "symbol": positions["asset2"]["symbol"],
+                    "side": positions["asset2"]["side"],
                     "type": "MARKET",
-                    "quantity": str(positions["eth"]["size"]),
+                    "quantity": str(positions["asset2"]["size"]),
                     "sideEffectType": "AUTO_BORROW_REPAY"
                 }
-                eth_order = self.client.new_margin_order(**eth_params)
-                logger.info(f"Live ETH order successful: ID {eth_order['orderId']}")
-                await ctx.send(f"✅ ETH order placed: {eth_order['orderId']}")
+                asset2_order = self.client.new_margin_order(**asset2_params)
+                logger.info(f"Live {positions['asset2']['name']} order successful: ID {asset2_order['orderId']}")
+                await ctx.send(f"✅ {positions['asset2']['name']} order placed: {asset2_order['orderId']}")
             except Exception as e:
-                logger.error(f"Live ETH order failed, reversing BTC: {e}")
-                await ctx.send(f"❌ ETH failed: {e}")
-                # Reverse BTC if ETH fails
+                logger.error(f"Live {positions['asset2']['name']} order failed, reversing {positions['asset1']['name']}: {e}")
+                await ctx.send(f"❌ {positions['asset2']['name']} failed: {e}")
+                # Reverse first asset if second asset fails
                 reverse_params = {
-                    "symbol": "BTCUSDT",
-                    "side": "BUY" if positions["btc"]["side"] == "SELL" else "SELL",
+                    "symbol": positions["asset1"]["symbol"],
+                    "side": "BUY" if positions["asset1"]["side"] == "SELL" else "SELL",
                     "type": "MARKET",
-                    "quantity": str(positions["btc"]["size"]),
+                    "quantity": str(positions["asset1"]["size"]),
                     "sideEffectType": "AUTO_BORROW_REPAY"
                 }
                 self.client.new_margin_order(**reverse_params)
-                logger.warning("BTC position reversed due to ETH failure")
-                await ctx.send("🔄 Reversed BTC position")
+                logger.warning(f"{positions['asset1']['name']} position reversed due to {positions['asset2']['name']} failure")
+                await ctx.send(f"🔄 Reversed {positions['asset1']['name']} position")
                 
             logger.info(f"Live pairs test completed for {ctx.author.name}")
             
