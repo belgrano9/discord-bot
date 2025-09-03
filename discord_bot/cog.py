@@ -36,6 +36,8 @@ class CrossMarginBot(commands.Cog):
         # Signal approval system
         self.pending_signals = {}
         self.APPROVAL_TIMEOUT = 60  # minutes
+        self.TAKE_PROFIT_FACTOR = 0.5  # Exit when 50% of the signal's threshold is met
+        self.STOP_LOSS_FACTOR = 0.5
         logger.info(f"Signal approval system initialized with {self.APPROVAL_TIMEOUT}min timeout")
         logger.info("Cross margin cog initialization complete")
 
@@ -1091,8 +1093,8 @@ class CrossMarginBot(commands.Cog):
             # Check minimum notionals
             logger.debug("Checking minimum notional requirements...")
             
-            asset1_notional = btc_amount * asset1_price
-            asset2_notional = eth_amount * asset2_price
+            asset1_notional = asset1_amount * asset1_price
+            asset2_notional = asset2_amount * asset2_price
             
             min_notional = 5  # Binance minimum is usually ~$5
             
@@ -1152,30 +1154,53 @@ class CrossMarginBot(commands.Cog):
             
             # Calculate spread-based exit levels
             if signal_data.get('action') == 'LONG':  # Long spread
-                target_spread_exit = current_spread + (spread_threshold * 0.5)  # Take profit when spread increases
-                stop_spread_exit = current_spread - (spread_threshold * 0.3)    # Stop if spread decreases more
+                target_spread_exit = current_spread + (spread_threshold * self.TAKE_PROFIT_FACTOR)
+                stop_spread_exit = current_spread - (spread_threshold * self.STOP_LOSS_FACTOR)
             else:  # Short spread
-                target_spread_exit = current_spread - (spread_threshold * 0.5)  # Take profit when spread decreases  
-                stop_spread_exit = current_spread + (spread_threshold * 0.3)    # Stop if spread increases more
+                target_spread_exit = current_spread - (spread_threshold * self.TAKE_PROFIT_FACTOR)
+                stop_spread_exit = current_spread + (spread_threshold * self.STOP_LOSS_FACTOR)
             
             logger.info(f"SPREAD TARGETS - Current: {current_spread:.6f}, TP: {target_spread_exit:.6f}, SL: {stop_spread_exit:.6f}")
             
-            # TRUE PAIRS TRADING: Manual spread monitoring (not individual OCOs)
-            # In production, you'd monitor the spread and close both positions when:
-            # 1. Spread reverts to mean (profit target)
-            # 2. Spread moves against you beyond threshold (stop loss)
-            # 3. Time-based exit (holding period limit)
+            # AUTOMATED SPREAD-BASED EXIT SYSTEM
+            # Store position data for spread monitoring
+            position_id = f"pairs_{int(datetime.now().timestamp())}"
+            
+            position_data = {
+                'position_id': position_id,
+                'asset1_symbol': asset1_symbol,
+                'asset2_symbol': asset2_symbol,
+                'asset1_side': asset1_side,
+                'asset2_side': asset2_side,
+                'asset1_amount': asset1_amount,
+                'asset2_amount': asset2_amount,
+                'beta': beta,
+                'entry_spread': current_spread,
+                'target_spread': target_spread_exit,
+                'stop_spread': stop_spread_exit,
+                'entry_time': datetime.now(),
+                'signal_action': signal_data.get('action'),
+                'status': 'ACTIVE'
+            }
+            
+            # Store for monitoring (you'd save this to a database in production)
+            if not hasattr(self, 'active_pairs_positions'):
+                self.active_pairs_positions = {}
+            self.active_pairs_positions[position_id] = position_data
+            
+            # Start automated monitoring
+            asyncio.create_task(self.monitor_pairs_spread(position_data, channel))
             
             await channel.send(
-                f"🎯 **PAIRS TRADE ACTIVE**\n"
-                f"📊 Spread Entry: {current_spread:.6f}\n"
-                f"🎯 Target: {target_spread_exit:.6f}\n"
-                f"🛑 Stop: {stop_spread_exit:.6f}\n"
-                f"⚠️ **Manual monitoring required - close both positions when spread target is hit!**"
+                f"🎯 **PAIRS TRADE ACTIVE** (ID: {position_id})\n"
+                f"📊 Entry Spread: {current_spread:.6f}\n"
+                f"🎯 Profit Target: {target_spread_exit:.6f}\n"
+                f"🛑 Stop Loss: {stop_spread_exit:.6f}\n"
+                f"🤖 **Automated spread monitoring active**"
             )
             
-            logger.warning("PAIRS TRADE: No automatic OCO orders - spread monitoring required!")
-            logger.info(f"Position will profit when spread moves from {current_spread:.6f} toward {target_spread_exit:.6f}")
+            logger.info(f"AUTOMATED PAIRS MONITORING: Position {position_id} started")
+            logger.info(f"Will exit when spread hits {target_spread_exit:.6f} (profit) or {stop_spread_exit:.6f} (stop)")
             
             # Create TRUE PAIRS TRADE summary
             embed = discord.Embed(
@@ -1369,6 +1394,219 @@ Beta: {positions['hedge_ratio']:.4f}
         except Exception as e:
             logger.error(f"Live test failed for {ctx.author.name}: {e}")
             await ctx.send(f"❌ Test failed: {e}")
+
+    async def monitor_pairs_spread(self, position_data: dict, channel):
+        """Monitor spread and automatically exit pairs position when targets hit"""
+        position_id = position_data['position_id']
+        logger.info(f"Starting spread monitoring for pairs position {position_id}")
+        
+        check_interval = 60  # Check every minute
+        max_monitoring_hours = 24  # Stop monitoring after 24 hours
+        checks_performed = 0
+        max_checks = (max_monitoring_hours * 3600) // check_interval
+        
+        try:
+            while checks_performed < max_checks:
+                await asyncio.sleep(check_interval)
+                checks_performed += 1
+                
+                # Check if position still exists and is active
+                if (position_id not in self.active_pairs_positions or 
+                    self.active_pairs_positions[position_id]['status'] != 'ACTIVE'):
+                    logger.info(f"Position {position_id} no longer active, stopping monitoring")
+                    break
+                
+                # Get current prices
+                try:
+                    asset1_ticker = self.client.ticker_price(symbol=position_data['asset1_symbol'])
+                    asset2_ticker = self.client.ticker_price(symbol=position_data['asset2_symbol'])
+                    
+                    current_asset1_price = float(asset1_ticker['price'])
+                    current_asset2_price = float(asset2_ticker['price'])
+                    
+                    # Calculate current spread
+                    import math
+                    current_spread = math.log(current_asset1_price) - position_data['beta'] * math.log(current_asset2_price)
+                    
+                    logger.debug(f"Position {position_id}: Current spread {current_spread:.6f} (Entry: {position_data['entry_spread']:.6f})")
+                    
+                    # Check exit conditions
+                    should_exit = False
+                    exit_reason = ""
+                    
+                    # Profit target hit
+                    if position_data['signal_action'] == 'LONG':
+                        if current_spread >= position_data['target_spread']:
+                            should_exit = True
+                            exit_reason = "PROFIT TARGET - Spread increased as expected"
+                        elif current_spread <= position_data['stop_spread']:
+                            should_exit = True
+                            exit_reason = "STOP LOSS - Spread decreased against position"
+                    else:  # SHORT
+                        if current_spread <= position_data['target_spread']:
+                            should_exit = True
+                            exit_reason = "PROFIT TARGET - Spread decreased as expected"
+                        elif current_spread >= position_data['stop_spread']:
+                            should_exit = True
+                            exit_reason = "STOP LOSS - Spread increased against position"
+                    
+                    # Execute exit if conditions met
+                    if should_exit:
+                        logger.info(f"PAIRS EXIT TRIGGERED: {exit_reason}")
+                        await self.execute_pairs_exit(position_data, current_spread, exit_reason, channel)
+                        break
+                    
+                    # Progress update every 10 minutes
+                    if checks_performed % 10 == 0:
+                        spread_move = current_spread - position_data['entry_spread']
+                        await channel.send(
+                            f"📊 Pairs Monitor ({position_id[:8]}): Spread {current_spread:.6f} "
+                            f"({spread_move:+.6f} from entry)"
+                        )
+                    
+                except Exception as e:
+                    logger.error(f"Error checking spread for position {position_id}: {e}")
+                    await asyncio.sleep(check_interval)  # Wait before retry
+                    continue
+            
+            # Timeout exit
+            if checks_performed >= max_checks:
+                logger.warning(f"Position {position_id} monitoring timeout after {max_monitoring_hours}h")
+                await self.execute_pairs_exit(position_data, None, "TIME LIMIT - 24h monitoring timeout", channel)
+                
+        except Exception as e:
+            logger.error(f"Critical error in pairs monitoring for {position_id}: {e}")
+            await channel.send(f"❌ Monitoring error for {position_id[:8]}: {str(e)}")
+    
+    async def execute_pairs_exit(self, position_data: dict, exit_spread: float, reason: str, channel):
+        """Close both legs of the pairs trade simultaneously"""
+        position_id = position_data['position_id']
+        
+        try:
+            logger.info(f"EXECUTING PAIRS EXIT: {position_id} - {reason}")
+            
+            # Close both positions simultaneously
+            # Leg 1: Close first asset position
+            exit_side1 = "SELL" if position_data['asset1_side'] == "BUY" else "BUY"
+            leg1_order = self.client.new_margin_order(
+                symbol=position_data['asset1_symbol'],
+                side=exit_side1,
+                type="MARKET",
+                quantity=str(position_data['asset1_amount']),
+                sideEffectType="AUTO_BORROW_REPAY"
+            )
+            
+            # Leg 2: Close second asset position  
+            exit_side2 = "SELL" if position_data['asset2_side'] == "BUY" else "BUY"
+            leg2_order = self.client.new_margin_order(
+                symbol=position_data['asset2_symbol'],
+                side=exit_side2,
+                type="MARKET",
+                quantity=str(position_data['asset2_amount']),
+                sideEffectType="AUTO_BORROW_REPAY"
+            )
+            
+            # Calculate P&L
+            entry_spread = position_data['entry_spread']
+            spread_change = exit_spread - entry_spread if exit_spread else 0
+            
+            # Update position status
+            self.active_pairs_positions[position_id]['status'] = 'CLOSED'
+            self.active_pairs_positions[position_id]['exit_spread'] = exit_spread
+            self.active_pairs_positions[position_id]['exit_reason'] = reason
+            self.active_pairs_positions[position_id]['exit_time'] = datetime.now()
+            
+            # Send completion message
+            embed = discord.Embed(
+                title="🏁 PAIRS TRADE CLOSED",
+                description=f"Position {position_id[:8]} exited",
+                color=discord.Color.green() if "PROFIT" in reason else discord.Color.orange(),
+                timestamp=datetime.now()
+            )
+            
+            embed.add_field(
+                name="Exit Reason", 
+                value=reason, 
+                inline=False
+            )
+            
+            if exit_spread:
+                embed.add_field(
+                    name="Spread Performance",
+                    value=f"Entry: {entry_spread:.6f}\nExit: {exit_spread:.6f}\nChange: {spread_change:+.6f}",
+                    inline=True
+                )
+            
+            embed.add_field(
+                name="Orders Executed",
+                value=f"Leg 1: {leg1_order['orderId']}\nLeg 2: {leg2_order['orderId']}",
+                inline=True
+            )
+            
+            await channel.send(embed=embed)
+            
+            logger.info(f"PAIRS EXIT COMPLETE: {position_id} - Both legs closed successfully")
+            
+        except Exception as e:
+            logger.error(f"ERROR IN PAIRS EXIT: {position_id} - {e}")
+            await channel.send(f"❌ **CRITICAL**: Failed to close pairs position {position_id[:8]}: {str(e)}")
+            # Mark as error for manual intervention
+            if position_id in self.active_pairs_positions:
+                self.active_pairs_positions[position_id]['status'] = 'ERROR'
+    
+    @commands.command(name="pairslist")
+    async def list_active_pairs(self, ctx):
+        """List all active pairs trading positions"""
+        if not hasattr(self, 'active_pairs_positions') or not self.active_pairs_positions:
+            await ctx.send("No active pairs positions")
+            return
+        
+        embed = discord.Embed(title="Active Pairs Positions", color=discord.Color.blue())
+        
+        for pos_id, pos_data in self.active_pairs_positions.items():
+            if pos_data['status'] == 'ACTIVE':
+                runtime = datetime.now() - pos_data['entry_time']
+                embed.add_field(
+                    name=f"Position {pos_id[:8]}",
+                    value=f"Pair: {pos_data['asset1_symbol']}/{pos_data['asset2_symbol']}\n"
+                          f"Action: {pos_data['signal_action']}\n"
+                          f"Runtime: {runtime.seconds//60}m",
+                    inline=True
+                )
+        
+        await ctx.send(embed=embed)
+    
+    @commands.command(name="closepairs")
+    async def manual_close_pairs(self, ctx, position_id: str = None):
+        """Manually close a specific pairs position or all positions"""
+        if not hasattr(self, 'active_pairs_positions'):
+            await ctx.send("No pairs positions found")
+            return
+        
+        if position_id:
+            # Close specific position
+            if position_id not in self.active_pairs_positions:
+                await ctx.send(f"Position {position_id} not found")
+                return
+            
+            pos_data = self.active_pairs_positions[position_id]
+            if pos_data['status'] != 'ACTIVE':
+                await ctx.send(f"Position {position_id} is not active (status: {pos_data['status']})")
+                return
+            
+            await self.execute_pairs_exit(pos_data, None, "MANUAL CLOSE - User requested", ctx.channel)
+        else:
+            # Close all active positions
+            active_positions = [p for p in self.active_pairs_positions.values() if p['status'] == 'ACTIVE']
+            if not active_positions:
+                await ctx.send("No active pairs positions to close")
+                return
+            
+            await ctx.send(f"Closing {len(active_positions)} active pairs positions...")
+            
+            for pos_data in active_positions:
+                await self.execute_pairs_exit(pos_data, None, "MANUAL CLOSE ALL - User requested", ctx.channel)
+                await asyncio.sleep(1)  # Small delay between closures
 
 async def setup(bot):
     """Add the cross margin cog to the bot"""
