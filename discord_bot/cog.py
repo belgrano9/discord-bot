@@ -14,7 +14,48 @@ from datetime import datetime, timedelta
 import asyncio
 import re
 import uuid
+import pandas as pd
 
+class PandasLogSink:
+    """A custom loguru sink to capture logs in memory for Excel export."""
+    def __init__(self):
+        self.logs = []
+
+    def _sink(self, message):
+        """The function that loguru will call for each new log record."""
+        record = message.record
+        
+        # Extract the relevant data into a structured dictionary
+        log_entry = {
+            "timestamp": record["time"].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+            "level": record["level"].name,
+            "message": record["message"],
+            "function": record["function"],
+            "line": record["line"],
+            "name": record["name"],
+        }
+        self.logs.append(log_entry)
+
+    def save_to_excel(self, filename: str = None) -> str:
+        """Converts the captured logs to a DataFrame and saves to Excel."""
+        if not self.logs:
+            return "No logs have been captured yet."
+
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"bot_logs_{timestamp}.xlsx"
+            
+        # Create a pandas DataFrame from our list of log dictionaries
+        df = pd.DataFrame(self.logs)
+        
+        try:
+            # Save the DataFrame to an Excel file
+            df.to_excel(filename, index=False, engine='openpyxl')
+            logger.info(f"Successfully saved {len(self.logs)} log entries to {filename}")
+            return f"Successfully saved {len(self.logs)} log entries to `{filename}`"
+        except Exception as e:
+            logger.error(f"Failed to save logs to Excel: {e}")
+            return f"Error saving logs to Excel: {e}"
 
 class CrossMarginBot(commands.Cog):
     """Discord cog for cross margin trading operations"""
@@ -22,6 +63,15 @@ class CrossMarginBot(commands.Cog):
     def __init__(self, bot):
         logger.info("Initializing CrossMarginBot cog...")
         self.bot = bot
+
+        # =======================================================================
+        # 1. Create an instance of our new sink
+        self.log_sink = PandasLogSink()
+        # 2. Tell loguru to send all logs (INFO and higher) to our custom sink
+        logger.add(self.log_sink._sink, level="INFO", format="{message}")
+        # =======================================================================
+
+
         api_key = os.getenv("BINANCE_API_KEY", "")
         api_secret = os.getenv("BINANCE_API_SECRET", "")
         
@@ -38,6 +88,8 @@ class CrossMarginBot(commands.Cog):
         self.APPROVAL_TIMEOUT = 60  # minutes
         self.TAKE_PROFIT_FACTOR = 0.5  # Exit when 50% of the signal's threshold is met
         self.STOP_LOSS_FACTOR = 0.5
+        self.CAPITAL_ALLOCATION = 0.5
+
         logger.info(f"Signal approval system initialized with {self.APPROVAL_TIMEOUT}min timeout")
         logger.info("Cross margin cog initialization complete")
 
@@ -499,9 +551,9 @@ class CrossMarginBot(commands.Cog):
             logger.warning(f"Failed to extract assets from '{pair_str}': {e}. Using BTC/ETH fallback.")
             return "BTC", "ETH"
     
-    def calculate_pair_positions(self, signal_data: dict, total_capital: float, capital_allocation: float = 0.20) -> dict:
+    def calculate_pair_positions(self, signal_data: dict, total_capital: float) -> dict:
         """Calculate position sizes for pairs trading"""
-        logger.debug(f"Calculating pair positions with capital: ${total_capital:.2f}, allocation: {capital_allocation*100}%")
+        logger.debug(f"Calculating pair positions with capital: ${total_capital:.2f}, allocation: {self.CAPITAL_ALLOCATION*100}%")
         
         beta = signal_data['beta']
         asset1_price = signal_data['asset1_price'] 
@@ -516,7 +568,7 @@ class CrossMarginBot(commands.Cog):
         logger.debug(f"Signal parameters - Beta: {beta:.4f}, {asset1_name}: ${asset1_price:.2f}, {asset2_name}: ${asset2_price:.2f}, Action: {action}")
         logger.debug(f"Trading symbols: {symbol1}, {symbol2}")
         
-        allocated_capital = total_capital * capital_allocation
+        allocated_capital = total_capital * self.CAPITAL_ALLOCATION
         
         # Corrected calculation to handle negative beta and ensure positive position sizes
         asset1_dollar_allocation = allocated_capital / (1 + abs(beta))
@@ -1030,7 +1082,7 @@ class CrossMarginBot(commands.Cog):
         # Calculate TRUE PAIRS TRADING positions with proper hedging
         account_info = self.client.margin_account()
         total_capital = self.extract_total_capital(account_info, signal_data)
-        positions = self.calculate_pair_positions(signal_data, total_capital, capital_allocation=0.25)
+        positions = self.calculate_pair_positions(signal_data, total_capital)
         
         # Extract the calculated amounts and sides (now properly hedged)
         asset1_amount = positions['asset1']['size']
@@ -1456,8 +1508,8 @@ Beta: {positions['hedge_ratio']:.4f}
                         await self.execute_pairs_exit(position_data, current_spread, exit_reason, channel)
                         break
                     
-                    # Progress update every 10 minutes
-                    if checks_performed % 10 == 0:
+                    # Progress update every 2 minutes
+                    if checks_performed % 2 == 0:
                         spread_move = current_spread - position_data['entry_spread']
                         await channel.send(
                             f"📊 Pairs Monitor ({position_id[:8]}): Spread {current_spread:.6f} "
@@ -1607,6 +1659,32 @@ Beta: {positions['hedge_ratio']:.4f}
             for pos_data in active_positions:
                 await self.execute_pairs_exit(pos_data, None, "MANUAL CLOSE ALL - User requested", ctx.channel)
                 await asyncio.sleep(1)  # Small delay between closures
+
+
+    # Command to log trades
+    @commands.command(name="savelogs")
+    @commands.is_owner()  # Restrict this command to the bot owner for safety
+    async def save_logs(self, ctx):
+        """Saves all captured logs to an Excel file."""
+        logger.info(f"Log save command initiated by {ctx.author.name}")
+        
+        # This message is helpful for long-running bots with many logs
+        await ctx.send("Saving logs... this may take a moment.")
+        
+        # Call the method from our sink instance
+        result_message = self.log_sink.save_to_excel()
+        
+        await ctx.send(result_message)
+        
+        # Optional: If you want to also send the file to Discord
+        try:
+            # The filename is the last word in the success message
+            filename = result_message.split("`")[-2]
+            await ctx.send(file=discord.File(filename))
+        except Exception as e:
+            logger.warning(f"Could not send log file to Discord: {e}")
+            # This might fail if the file is too large for Discord's limits
+            await ctx.send("Could not upload file to Discord (it may be too large).")
 
 async def setup(bot):
     """Add the cross margin cog to the bot"""
