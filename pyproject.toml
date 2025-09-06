@@ -30,6 +30,7 @@ python-binance = "^1.0.29"
 xlsxwriter = "^3.2.3"
 ipykernel = "^6.29.5"
 pydantic = "^2.11.7"
+openpyxl = "^3.1.5"
 
 
 [tool.poetry.group.dev.dependencies]

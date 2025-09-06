@@ -589,12 +589,12 @@ class CrossMarginBot(commands.Cog):
         # LONG signal = spread too LOW → BUY asset1, SELL asset2 (expecting spread to increase)
         # SHORT signal = spread too HIGH → SELL asset1, BUY asset2 (expecting spread to decrease)
         
-        if action == "LONG":  # Long the spread (buy asset1 relative to asset2)
-            asset1_side = "BUY"   # Always buy the numerator
-            asset2_side = "SELL"  # Always sell the denominator (hedged)
-        else:  # SHORT the spread (sell asset1 relative to asset2)
-            asset1_side = "SELL"  # Always sell the numerator  
-            asset2_side = "BUY"   # Always buy the denominator (hedged)
+        if action == "LONG":  # Long the spread 
+            asset1_side = "SELL"   # Flip these
+            asset2_side = "BUY"    # Flip these
+        else:  # SHORT the spread 
+            asset1_side = "BUY"    # Flip these
+            asset2_side = "SELL"   # Flip these
         
         logger.debug(f"TRUE PAIRS TRADE: {action} spread = {asset1_side} {asset1_name} + {asset2_side} {asset2_name}")
         
@@ -1228,6 +1228,8 @@ class CrossMarginBot(commands.Cog):
                 'asset2_amount': asset2_amount,
                 'beta': beta,
                 'entry_spread': current_spread,
+                'entry_price_asset1': executed_asset1_price, # MODIFICATION 1: Store entry price for asset 1
+                'entry_price_asset2': executed_asset2_price, # MODIFICATION 1: Store entry price for asset 2
                 'target_spread': target_spread_exit,
                 'stop_spread': stop_spread_exit,
                 'entry_time': datetime.now(),
@@ -1558,20 +1560,27 @@ Beta: {positions['hedge_ratio']:.4f}
                 sideEffectType="AUTO_BORROW_REPAY"
             )
             
-            # Calculate P&L
-            entry_spread = position_data['entry_spread']
-            spread_change = exit_spread - entry_spread if exit_spread else 0
-            
+            # MODIFICATION 2: START OF CHANGES
+            # Calculate executed exit prices
+            exit_price_asset1 = float(leg1_order['cummulativeQuoteQty']) / float(leg1_order['executedQty'])
+            exit_price_asset2 = float(leg2_order['cummulativeQuoteQty']) / float(leg2_order['executedQty'])
+
+            # Retrieve entry prices from position_data
+            entry_price_asset1 = position_data.get('entry_price_asset1', 0)
+            entry_price_asset2 = position_data.get('entry_price_asset2', 0)
+            # MODIFICATION 2: END OF CHANGES
+
             # Update position status
             self.active_pairs_positions[position_id]['status'] = 'CLOSED'
             self.active_pairs_positions[position_id]['exit_spread'] = exit_spread
             self.active_pairs_positions[position_id]['exit_reason'] = reason
             self.active_pairs_positions[position_id]['exit_time'] = datetime.now()
             
+            # MODIFICATION 2: REVISED EMBED
             # Send completion message
             embed = discord.Embed(
                 title="🏁 PAIRS TRADE CLOSED",
-                description=f"Position {position_id[:8]} exited",
+                description=f"Position `{position_id[:12]}` exited.",
                 color=discord.Color.green() if "PROFIT" in reason else discord.Color.orange(),
                 timestamp=datetime.now()
             )
@@ -1582,20 +1591,28 @@ Beta: {positions['hedge_ratio']:.4f}
                 inline=False
             )
             
-            if exit_spread:
-                embed.add_field(
-                    name="Spread Performance",
-                    value=f"Entry: {entry_spread:.6f}\nExit: {exit_spread:.6f}\nChange: {spread_change:+.6f}",
-                    inline=True
-                )
+            # Add field for Asset 1
+            embed.add_field(
+                name=f"Asset 1: {position_data['asset1_symbol']}",
+                value=f"Entry Price: `${entry_price_asset1:,.4f}`\nExit Price:  `${exit_price_asset1:,.4f}`",
+                inline=True
+            )
+
+            # Add field for Asset 2
+            embed.add_field(
+                name=f"Asset 2: {position_data['asset2_symbol']}",
+                value=f"Entry Price: `${entry_price_asset2:,.4f}`\nExit Price:  `${exit_price_asset2:,.4f}`",
+                inline=True
+            )
             
             embed.add_field(
                 name="Orders Executed",
-                value=f"Leg 1: {leg1_order['orderId']}\nLeg 2: {leg2_order['orderId']}",
+                value=f"Leg 1: `{leg1_order['orderId']}`\nLeg 2: `{leg2_order['orderId']}`",
                 inline=True
             )
             
             await channel.send(embed=embed)
+            # MODIFICATION 2: END OF REVISED EMBED
             
             logger.info(f"PAIRS EXIT COMPLETE: {position_id} - Both legs closed successfully")
             
