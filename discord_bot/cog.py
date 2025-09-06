@@ -1232,7 +1232,12 @@ class CrossMarginBot(commands.Cog):
                 'stop_spread': stop_spread_exit,
                 'entry_time': datetime.now(),
                 'signal_action': signal_data.get('action'),
-                'status': 'ACTIVE'
+                'status': 'ACTIVE',
+                # =======================================================================
+                # MODIFICATION 1: Store the exact entry prices for later comparison
+                # =======================================================================
+                'asset1_entry_price': executed_asset1_price,
+                'asset2_entry_price': executed_asset2_price,
             }
             
             # Store for monitoring (you'd save this to a database in production)
@@ -1490,17 +1495,17 @@ Beta: {positions['hedge_ratio']:.4f}
                     if position_data['signal_action'] == 'LONG':
                         if current_spread >= position_data['target_spread']:
                             should_exit = True
-                            exit_reason = "PROFIT TARGET - Spread increased as expected"
+                            exit_reason = "PROFIT TARGET"
                         elif current_spread <= position_data['stop_spread']:
                             should_exit = True
-                            exit_reason = "STOP LOSS - Spread decreased against position"
+                            exit_reason = "STOP LOSS"
                     else:  # SHORT
                         if current_spread <= position_data['target_spread']:
                             should_exit = True
-                            exit_reason = "PROFIT TARGET - Spread decreased as expected"
+                            exit_reason = "PROFIT TARGET"
                         elif current_spread >= position_data['stop_spread']:
                             should_exit = True
-                            exit_reason = "STOP LOSS - Spread increased against position"
+                            exit_reason = "STOP LOSS"
                     
                     # Execute exit if conditions met
                     if should_exit:
@@ -1524,7 +1529,7 @@ Beta: {positions['hedge_ratio']:.4f}
             # Timeout exit
             if checks_performed >= max_checks:
                 logger.warning(f"Position {position_id} monitoring timeout after {max_monitoring_hours}h")
-                await self.execute_pairs_exit(position_data, None, "TIME LIMIT - 24h monitoring timeout", channel)
+                await self.execute_pairs_exit(position_data, None, "TIME LIMIT", channel)
                 
         except Exception as e:
             logger.error(f"Critical error in pairs monitoring for {position_id}: {e}")
@@ -1558,41 +1563,70 @@ Beta: {positions['hedge_ratio']:.4f}
                 sideEffectType="AUTO_BORROW_REPAY"
             )
             
-            # Calculate P&L
-            entry_spread = position_data['entry_spread']
-            spread_change = exit_spread - entry_spread if exit_spread else 0
+            # =======================================================================
+            # MODIFICATION 2: Overhaul the entire embed to match the desired format
+            # =======================================================================
+            exit_time = datetime.now()
+
+            # Calculate exit prices from the order responses
+            exit_asset1_price = float(leg1_order['cummulativeQuoteQty']) / float(leg1_order['executedQty'])
+            exit_asset2_price = float(leg2_order['cummulativeQuoteQty']) / float(leg2_order['executedQty'])
+
+            # Get entry data from the stored position info
+            entry_time = position_data['entry_time']
+            asset1_entry_price = position_data.get('asset1_entry_price', 0)
+            asset2_entry_price = position_data.get('asset2_entry_price', 0)
             
-            # Update position status
+            # Calculate duration
+            duration_delta = exit_time - entry_time
+            hours, remainder = divmod(duration_delta.seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            duration_str = f"{hours}h {minutes}m {seconds}s"
+
+            # Update position status in memory
             self.active_pairs_positions[position_id]['status'] = 'CLOSED'
             self.active_pairs_positions[position_id]['exit_spread'] = exit_spread
             self.active_pairs_positions[position_id]['exit_reason'] = reason
-            self.active_pairs_positions[position_id]['exit_time'] = datetime.now()
+            self.active_pairs_positions[position_id]['exit_time'] = exit_time
             
-            # Send completion message
+            # Create the new, detailed embed
             embed = discord.Embed(
                 title="🏁 PAIRS TRADE CLOSED",
-                description=f"Position {position_id[:8]} exited",
+                description=f"Position `{position_id}` exited.",
                 color=discord.Color.green() if "PROFIT" in reason else discord.Color.orange(),
-                timestamp=datetime.now()
+                timestamp=exit_time
             )
             
             embed.add_field(
-                name="Exit Reason", 
-                value=reason, 
+                name="Exit Reason",
+                value=f"**{reason}**",
                 inline=False
             )
             
-            if exit_spread:
-                embed.add_field(
-                    name="Spread Performance",
-                    value=f"Entry: {entry_spread:.6f}\nExit: {exit_spread:.6f}\nChange: {spread_change:+.6f}",
-                    inline=True
-                )
+            embed.add_field(
+                name=f"Asset 1: {position_data['asset1_symbol']}",
+                value=f"Entry: `${asset1_entry_price:.4f}`\nExit: `${exit_asset1_price:.4f}`",
+                inline=True
+            )
             
             embed.add_field(
-                name="Orders Executed",
-                value=f"Leg 1: {leg1_order['orderId']}\nLeg 2: {leg2_order['orderId']}",
+                name=f"Asset 2: {position_data['asset2_symbol']}",
+                value=f"Entry: `${asset2_entry_price:.4f}`\nExit: `${exit_asset2_price:.4f}`",
                 inline=True
+            )
+
+            embed.add_field(
+                name="Orders Executed",
+                value=f"Leg 1: `{leg1_order['orderId']}`\nLeg 2: `{leg2_order['orderId']}`",
+                inline=True
+            )
+
+            embed.add_field(
+                name="Timestamps",
+                value=(f"**Entry:** {entry_time.strftime('%Y-%m-%d %H:%M')}\n"
+                       f"**Exit:** {exit_time.strftime('%Y-%m-%d %H:%M')}\n"
+                       f"**Duration:** {duration_str}"),
+                inline=False
             )
             
             await channel.send(embed=embed)
@@ -1646,7 +1680,7 @@ Beta: {positions['hedge_ratio']:.4f}
                 await ctx.send(f"Position {position_id} is not active (status: {pos_data['status']})")
                 return
             
-            await self.execute_pairs_exit(pos_data, None, "MANUAL CLOSE - User requested", ctx.channel)
+            await self.execute_pairs_exit(pos_data, None, "MANUAL CLOSE", ctx.channel)
         else:
             # Close all active positions
             active_positions = [p for p in self.active_pairs_positions.values() if p['status'] == 'ACTIVE']
@@ -1657,7 +1691,7 @@ Beta: {positions['hedge_ratio']:.4f}
             await ctx.send(f"Closing {len(active_positions)} active pairs positions...")
             
             for pos_data in active_positions:
-                await self.execute_pairs_exit(pos_data, None, "MANUAL CLOSE ALL - User requested", ctx.channel)
+                await self.execute_pairs_exit(pos_data, None, "MANUAL CLOSE ALL", ctx.channel)
                 await asyncio.sleep(1)  # Small delay between closures
 
 
