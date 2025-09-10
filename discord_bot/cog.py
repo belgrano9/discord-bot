@@ -570,18 +570,32 @@ class CrossMarginBot(commands.Cog):
         
         allocated_capital = total_capital * self.CAPITAL_ALLOCATION
         
-        # Corrected calculation to handle negative beta and ensure positive position sizes
-        asset1_dollar_allocation = allocated_capital / (1 + abs(beta))
-        asset2_dollar_allocation = asset1_dollar_allocation * abs(beta)
+        # Corrected calculation to match dashboard.py logic exactly
+        # Asset1 gets base allocation, Asset2 gets beta-scaled allocation for proper hedging
+        asset1_dollar_allocation = allocated_capital / (1 + abs(beta))  # Base amount
+        asset2_dollar_allocation = abs(beta) * asset1_dollar_allocation  # Beta-hedged amount
 
         asset1_size = asset1_dollar_allocation / asset1_price
         asset2_size = asset2_dollar_allocation / asset2_price
         
         logger.debug(f"Raw calculations - {asset1_name} size: {asset1_size:.8f}, {asset2_name} size: {asset2_size:.8f}")
         
-        # Round to proper lot sizes for different assets
-        asset1_size = self._round_to_lot_size(asset1_size, asset1_name)
-        asset2_size = self._round_to_lot_size(asset2_size, asset2_name)
+        # Smart rounding to preserve hedge ratio while meeting Binance requirements
+        asset1_size_rounded = self._round_to_lot_size(asset1_size, asset1_name)
+        
+        # Calculate how much asset2 we actually need based on rounded asset1
+        target_asset2_dollars = asset1_size_rounded * asset1_price * abs(beta)
+        asset2_size_ideal = target_asset2_dollars / asset2_price
+        asset2_size = self._round_to_lot_size(asset2_size_ideal, asset2_name)
+        
+        # Final validation - recalculate dollar values after rounding
+        asset1_dollar_allocation = asset1_size_rounded * asset1_price
+        asset2_dollar_allocation = asset2_size * asset2_price
+        
+        logger.debug(f"Hedge-preserving adjustment - {asset1_name}: {asset1_size:.6f} → {asset1_size_rounded:.6f}")
+        logger.debug(f"Adjusted {asset2_name} for hedge: {asset2_size_ideal:.6f} → {asset2_size:.6f}")
+        
+        asset1_size = asset1_size_rounded
         
         logger.debug(f"Rounded sizes - {asset1_name}: {asset1_size:.8f}, {asset2_name}: {asset2_size:.8f}")
         
