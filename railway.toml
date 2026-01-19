@@ -1,0 +1,6 @@
+[build]
+builder = "dockerfile"
+
+[deploy]
+startCommand = "python discord_bot/bot.py"
+restartPolicyType = "ON_FAILURE"

@@ -2,3 +2,8 @@ discord.py
 requests
 polars
 python-dotenv
+loguru
+binance-connector
+pandas
+pydantic
+xlsxwriter
